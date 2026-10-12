@@ -1,0 +1,687 @@
+
+; ================= NovaShell firmware =================
+; Stack machine shell. Replaces the default firmware.
+; Register map (set at boot):
+;   R0=CONSOLE_OUT  R1=KEYBOARD_IN R2=FILE_CMD   R3=FILE_ARG0
+;   R4=FILE_ARG1    R5=FILE_ARG2   R6=FILE_RESULT R7=LINE_BUF
+;   R8=IO_BUF       R10=saved DSP (entry data-stack pointer)
+;   R11-R14 = scratch
+
+_start:
+    DSPGET
+    POPR 10                    ; save entry DSP for `run`
+    PUSH64 0xFFFFFFFFFFFF0000
+    POPR 0                     ; R0 = console
+    PUSH64 0xFFFFFFFFFFFF0008
+    POPR 1                     ; R1 = keyboard
+    PUSH64 0xFFFFFFFFFFFF0010
+    POPR 2                     ; R2 = file cmd
+    PUSH64 0xFFFFFFFFFFFF0018
+    POPR 3                     ; R3 = file arg0
+    PUSH64 0xFFFFFFFFFFFF0020
+    POPR 4                     ; R4 = file arg1
+    PUSH64 0xFFFFFFFFFFFF0028
+    POPR 5                     ; R5 = file arg2
+    PUSH64 0xFFFFFFFFFFFF0030
+    POPR 6                     ; R6 = file result
+    PUSH8 0
+    POPR 15                    ; R15 = history count
+    PUSH64 3017
+    POPR 8                     ; R8 = IO_BUF (used by ls/cat via PUSHR 8)
+    PUSH64 1745
+    CALL print_str
+    JMP main_loop
+
+; ---------- print_char: c -> ----------
+print_char:
+    PUSHR 0
+    STORE8                     ; v addr -> ; pops addr, pops c
+    RET
+
+; ---------- print_str: addr -> (NUL-terminated) ----------
+print_str:
+    POPR 11                    ; R11 = cursor
+ps_loop:
+    PUSHR 11
+    LOADU8                     ; [b]
+    DUP
+    BZ ps_done                 ; pops test copy
+    PUSHR 0
+    STORE8                     ; print b
+    PUSHR 11
+    INC
+    POPR 11
+    JMP ps_loop
+ps_done:
+    POP                        ; drop NUL
+    RET
+
+; ---------- print_newline: -> ----------
+print_newline:
+    PUSH8 10
+    CALL print_char
+    RET
+
+; ---------- read_line: -> len ----------
+; Reads a line into LINE_BUF via KEYBOARD_IN polling.
+; Echoes input, handles backspace (8/127), ends on CR/LF.
+read_line:
+    PUSH8 0
+    POPR 12                    ; R12 = len
+rl_poll:
+    PUSHR 1
+    LOADU8
+    POPR 13                    ; R13 = key
+    PUSHR 13
+    BZ rl_poll                 ; 0 = no key yet
+    PUSHR 13
+    PUSH8 10
+    EQ
+    BNZ rl_done
+    PUSHR 13
+    PUSH8 13
+    EQ
+    BNZ rl_done
+    PUSHR 13
+    PUSH8 8
+    EQ
+    BNZ rl_bs
+    PUSHR 13
+    PUSH8 127
+    EQ
+    BNZ rl_bs
+    ; printable: store if room (127 max + NUL)
+    PUSHR 12
+    PUSH8 127
+    LT                         ; len < 127 ?
+    BZ rl_poll                 ; full: ignore char
+    PUSH64 2809
+    PUSHR 12
+    ADD
+    PUSHR 13
+    SWAP
+    STORE8                     ; buf[len] = key
+    PUSHR 13
+    CALL print_char            ; echo
+    PUSHR 12
+    INC
+    POPR 12
+    JMP rl_poll
+rl_bs:
+    PUSHR 12
+    BZ rl_poll                 ; len==0: nothing to erase
+    PUSHR 12
+    DEC
+    POPR 12
+    PUSH8 8
+    CALL print_char
+    PUSH8 32
+    CALL print_char
+    PUSH8 8
+    CALL print_char            ; erase: "\b \b"
+    JMP rl_poll
+rl_done:
+    PUSH64 2809
+    PUSHR 12
+    ADD
+    PUSH8 0
+    SWAP
+    STORE8                     ; NUL-terminate
+    CALL print_newline
+    PUSHR 12
+    RET
+
+; ---------- tokenize: -> ----------
+; Splits LINE_BUF into TOK0 (command) and TOK1 (argument).
+tokenize:
+    PUSH8 0
+    POPR 11                    ; i = src index
+    PUSH8 0
+    POPR 12                    ; j = dst index
+    PUSH8 0
+    POPR 13                    ; tok = 0 (cmd) / 1 (arg)
+tk_next:
+    PUSH64 2809
+    PUSHR 11
+    ADD
+    LOADU8
+    POPR 14                    ; R14 = c
+    PUSHR 11
+    INC
+    POPR 11                    ; i++
+    PUSHR 14
+    BZ tk_end                  ; NUL -> finish
+    PUSHR 14
+    PUSH8 32
+    EQ
+    BNZ tk_space
+    ; store char into current token
+    PUSHR 13
+    BZ tk_st0
+    PUSHR 12
+    PUSH8 63
+    LT
+    BZ tk_next                 ; tok1 full: drop
+    PUSH64 2953
+    JMP tk_store
+tk_st0:
+    PUSHR 12
+    PUSH8 15
+    LT
+    BZ tk_next                 ; tok0 full: drop
+    PUSH64 2937
+tk_store:
+    PUSHR 12
+    ADD
+    PUSHR 14
+    SWAP
+    STORE8
+    PUSHR 12
+    INC
+    POPR 12
+    JMP tk_next
+tk_space:
+    PUSHR 13
+    BNZ tk_next                ; already in arg: skip spaces
+    PUSHR 12
+    BZ tk_next                 ; leading space: skip
+    PUSH64 2937              ; end tok0 ...
+    PUSHR 12
+    ADD
+    PUSH8 0
+    SWAP
+    STORE8
+    PUSH8 1
+    POPR 13                    ; tok = 1
+    PUSH8 0
+    POPR 12                    ; j = 0
+    JMP tk_next
+tk_end:
+    PUSHR 13
+    BNZ tk_end1
+    PUSH64 2937
+    JMP tk_endt
+tk_end1:
+    PUSH64 2953
+tk_endt:
+    PUSHR 12
+    ADD
+    PUSH8 0
+    SWAP
+    STORE8                     ; terminate current token
+    PUSHR 13
+    BNZ tk_done2
+    PUSH64 2953              ; no arg seen: empty tok1
+    PUSH8 0
+    SWAP
+    STORE8
+tk_done2:
+    RET
+
+; ---------- streq: a b -> flag (1 if equal NUL strings) ----------
+streq:
+    POPR 11                    ; R11 = b
+    POPR 12                    ; R12 = a
+se_loop:
+    PUSHR 12
+    LOADU8
+    PUSHR 11
+    LOADU8
+    NE
+    BNZ se_no
+    PUSHR 12
+    LOADU8
+    BZ se_yes                  ; both ended together
+    PUSHR 12
+    INC
+    POPR 12
+    PUSHR 11
+    INC
+    POPR 11
+    JMP se_loop
+se_yes:
+    PUSH8 1
+    RET
+se_no:
+    PUSH8 0
+    RET
+
+; ---------- print_u64: n -> (decimal) ----------
+print_u64:
+    POPR 11                    ; R11 = n
+    PUSH8 0
+    POPR 12                    ; R12 = digit count
+    PUSHR 11
+    BZ pu_zero
+    JMP pu_l1
+pu_zero:
+    PUSH8 48
+    CALL print_char
+    RET
+pu_l1:
+    PUSHR 11
+    BZ pu_l2
+    PUSHR 11
+    PUSH8 10
+    REMU                       ; r = n % 10
+    PUSH8 48
+    ADD                        ; digit char
+    PUSHR 11
+    PUSH8 10
+    DIVU
+    POPR 11                    ; n /= 10
+    PUSHR 12
+    INC
+    POPR 12
+    JMP pu_l1
+pu_l2:                         ; pop digits (most significant on top) and print
+    PUSHR 12
+    BZ pu_done
+    CALL print_char
+    PUSHR 12
+    DEC
+    POPR 12
+    JMP pu_l2
+pu_done:
+    RET
+
+; ---------- hist_add: append LINE_BUF to history (20 x 32B slots) ----------
+hist_add:
+    PUSHR 15
+    PUSH8 20
+    LT                         ; count < 20 ?
+    BNZ ha_nofull
+    PUSH16 608                 ; full: shift left one slot (19*32)
+    PUSH64 3401
+    PUSH64 3401
+    PUSH8 32
+    ADD                        ; src = HIST+32
+    MEMCPY                     ; n dst src ->
+    PUSH8 19
+    POPR 15                    ; count = 19 (bump back to 20 below)
+ha_nofull:
+    PUSHR 15
+    PUSH8 32
+    MUL
+    PUSH64 3401
+    ADD
+    POPR 11                    ; R11 = dst slot
+    PUSH8 0
+    POPR 12                    ; i = 0
+ha_cl:
+    PUSHR 12
+    PUSH8 31
+    EQ
+    BNZ ha_cterm               ; i == 31 -> terminate
+    PUSH64 2809
+    PUSHR 12
+    ADD
+    LOADU8
+    POPR 13                    ; R13 = c
+    PUSHR 13
+    BZ ha_cterm                ; NUL -> terminate
+    PUSHR 11
+    PUSHR 12
+    ADD
+    PUSHR 13
+    SWAP
+    STORE8
+    PUSHR 12
+    INC
+    POPR 12
+    JMP ha_cl
+ha_cterm:
+    PUSHR 11
+    PUSHR 12
+    ADD
+    PUSH8 0
+    SWAP
+    STORE8
+    PUSHR 15
+    INC
+    POPR 15
+    RET
+
+; ---------- main loop ----------
+main_loop:
+    PUSH64 1817
+    CALL print_str
+    CALL read_line              ; [len]
+    DUP
+    BZ hskip
+    POPR 14
+    CALL hist_add              ; record non-empty lines
+    JMP hdone
+hskip:
+    POP
+hdone:
+    CALL tokenize
+    PUSH64 2937
+    LOADU8
+    BZ main_loop               ; empty line
+    PUSH64 2937
+    PUSH64 2761
+    CALL streq
+    BNZ do_help
+    PUSH64 2937
+    PUSH64 2769
+    CALL streq
+    BNZ do_ls
+    PUSH64 2937
+    PUSH64 2777
+    CALL streq
+    BNZ do_cat
+    PUSH64 2937
+    PUSH64 2785
+    CALL streq
+    BNZ do_run
+    PUSH64 2937
+    PUSH64 2793
+    CALL streq
+    BNZ do_clear
+    PUSH64 2937
+    PUSH64 2801
+    CALL streq
+    BNZ do_ver
+    PUSH64 2937
+    PUSH64 2689
+    CALL streq
+    BNZ do_pwd
+    PUSH64 2937
+    PUSH64 2697
+    CALL streq
+    BNZ do_echo
+    PUSH64 2937
+    PUSH64 2705
+    CALL streq
+    BNZ do_whoami
+    PUSH64 2937
+    PUSH64 2713
+    CALL streq
+    BNZ do_uname
+    PUSH64 2937
+    PUSH64 2721
+    CALL streq
+    BNZ do_date
+    PUSH64 2937
+    PUSH64 2729
+    CALL streq
+    BNZ do_uptime
+    PUSH64 2937
+    PUSH64 2737
+    CALL streq
+    BNZ do_ps
+    PUSH64 2937
+    PUSH64 2745
+    CALL streq
+    BNZ do_env
+    PUSH64 2937
+    PUSH64 2753
+    CALL streq
+    BNZ do_history
+    PUSH64 2345
+    CALL print_str
+    PUSH64 2937
+    CALL print_str
+    CALL print_newline
+    JMP main_loop
+
+do_help:
+    PUSH64 1825
+    CALL print_str
+    JMP main_loop
+
+do_clear:
+    PUSH64 2481
+    CALL print_str
+    JMP main_loop
+
+do_ver:
+    PUSH64 2449
+    CALL print_str
+    JMP main_loop
+
+do_pwd:
+    PUSH64 2489
+    CALL print_str
+    JMP main_loop
+
+do_whoami:
+    PUSH64 2505
+    CALL print_str
+    JMP main_loop
+
+do_uname:
+    PUSH64 2513
+    CALL print_str
+    JMP main_loop
+
+do_date:
+    PUSH64 2529
+    CALL print_str
+    JMP main_loop
+
+do_uptime:
+    PUSH64 2561
+    CALL print_str
+    JMP main_loop
+
+do_ps:
+    PUSH64 2569
+    CALL print_str
+    JMP main_loop
+
+do_env:
+    PUSH64 2625
+    CALL print_str
+    JMP main_loop
+
+; ---------- do_echo: print rest of line after "echo " ----------
+do_echo:
+    PUSH64 2809
+    POPR 11                    ; R11 = cursor
+eo1:                           ; skip the word "echo"
+    PUSHR 11
+    LOADU8
+    POPR 14                    ; R14 = c
+    PUSHR 14
+    BZ eo_print
+    PUSHR 14
+    PUSH8 32
+    EQ
+    BNZ eo2
+    PUSHR 11
+    INC
+    POPR 11
+    JMP eo1
+eo2:                           ; skip spaces
+    PUSHR 11
+    INC
+    POPR 11
+eo2l:
+    PUSHR 11
+    LOADU8
+    POPR 14
+    PUSHR 14
+    BZ eo_print
+    PUSHR 14
+    PUSH8 32
+    EQ
+    BNZ eo2
+    JMP eo_print
+eo_print:
+    PUSHR 11
+    CALL print_str
+    CALL print_newline
+    JMP main_loop
+
+; ---------- do_history: list recorded commands ----------
+do_history:
+    PUSH8 0
+    POPR 13                    ; R13 = i (R11/R12 used by print_u64)
+dh_loop:
+    PUSHR 13
+    PUSHR 15
+    EQ
+    BNZ main_loop
+    PUSHR 13
+    INC
+    CALL print_u64             ; line number
+    PUSH8 32
+    CALL print_char
+    PUSHR 13
+    PUSH8 32
+    MUL
+    PUSH64 3401
+    ADD
+    CALL print_str
+    CALL print_newline
+    PUSHR 13
+    INC
+    POPR 13
+    JMP dh_loop
+
+; ---------- do_ls: list shared folder ----------
+do_ls:
+    PUSH64 3017
+    PUSHR 3
+    STORE64                    ; ARG0 = buffer
+    PUSH16 384
+    PUSHR 4
+    STORE64                    ; ARG1 = size
+    PUSH8 1
+    PUSHR 2
+    STORE64                    ; CMD = LIST
+    PUSHR 6
+    LOAD64
+    POPR 11                    ; R11 = byte count (-1 = error)
+    PUSHR 11
+    PUSH64 0xFFFFFFFFFFFFFFFF
+    EQ
+    BNZ ls_err
+    PUSHR 8
+    POPR 12                    ; R12 = cursor
+    PUSHR 8
+    PUSHR 11
+    ADD
+    POPR 13                    ; R13 = end
+ls_loop:
+    PUSHR 12
+    PUSHR 13
+    EQ
+    BNZ main_loop
+    PUSHR 12
+    CALL print_str              ; names are NUL-separated
+    CALL print_newline
+ls_adv:
+    PUSHR 12
+    LOADU8
+    BZ ls_advd
+    PUSHR 12
+    INC
+    POPR 12
+    JMP ls_adv
+ls_advd:
+    PUSHR 12
+    INC
+    POPR 12
+    JMP ls_loop
+ls_err:
+    PUSH64 2417
+    CALL print_str
+    JMP main_loop
+
+; ---------- file_cat: path -> (print file) ----------
+file_cat:
+    POPR 11                    ; R11 = path
+    PUSHR 11
+    PUSHR 3
+    STORE64                    ; ARG0 = path
+    PUSH64 3017
+    PUSHR 4
+    STORE64                    ; ARG1 = buffer
+    PUSH16 384
+    PUSHR 5
+    STORE64                    ; ARG2 = size
+    PUSH8 2
+    PUSHR 2
+    STORE64                    ; CMD = READ
+    PUSHR 6
+    LOAD64
+    POPR 12                    ; R12 = n (-1 = error)
+    PUSHR 12
+    PUSH64 0xFFFFFFFFFFFFFFFF
+    EQ
+    BNZ fc_err
+    PUSH8 0
+    POPR 13                    ; i = 0
+fc_loop:
+    PUSHR 13
+    PUSHR 12
+    EQ
+    BNZ fc_done
+    PUSHR 8
+    PUSHR 13
+    ADD
+    LOADU8
+    CALL print_char
+    PUSHR 13
+    INC
+    POPR 13
+    JMP fc_loop
+fc_done:
+    CALL print_newline
+    RET
+fc_err:
+    PUSH64 2417
+    CALL print_str
+    RET
+
+do_cat:
+    PUSH64 2953
+    LOADU8
+    BZ cat_usage
+    PUSH64 2953
+    CALL file_cat
+    JMP main_loop
+cat_usage:
+    PUSH64 2369
+    CALL print_str
+    JMP main_loop
+
+; ---------- do_run: load program at 0x1000 and jump ----------
+do_run:
+    PUSH64 2953
+    LOADU8
+    BZ run_usage
+    PUSH64 2953
+    PUSHR 3
+    STORE64                    ; ARG0 = path
+    PUSH16 4096
+    PUSHR 4
+    STORE64                    ; ARG1 = 0x1000
+    PUSH32 65536
+    PUSHR 5
+    STORE64                    ; ARG2 = 64KB max
+    PUSH8 2
+    PUSHR 2
+    STORE64                    ; CMD = READ
+    PUSHR 6
+    LOAD64
+    POPR 11                    ; R11 = bytes read
+    PUSHR 11
+    PUSH64 0xFFFFFFFFFFFFFFFF
+    EQ
+    BNZ run_err
+    PUSHR 10
+    DSPSET                     ; restore entry data-stack pointer
+    PUSH16 4096
+    JMPI                       ; PC = 0x1000 (no return)
+run_err:
+    PUSH64 2433
+    CALL print_str
+    JMP main_loop
+run_usage:
+    PUSH64 2393
+    CALL print_str
+    JMP main_loop
