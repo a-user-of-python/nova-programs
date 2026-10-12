@@ -79,7 +79,7 @@ GALAXY = render_galaxy()
 
 # Fastfetch-style specs
 SPECS = [
-    ("title", "sean@nova"),
+    ("title", "user@nova"),
     ("sep", "─────────────────────────────────"),
     ("OS", "NOVA Firmware v0.0.4"),
     ("Host", "NovaVM (iOS App)"),

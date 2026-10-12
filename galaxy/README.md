@@ -5,7 +5,7 @@ A fastfetch-style program that displays a colored spiral galaxy made of ASCII ch
 ## Preview
 
 ```
-              .  *  .                sean@nova
+              .  *  .                user@nova
            *     .     *             ─────────────────
         .    .  *  .    .            OS: NOVA Firmware v0.0.1
      *    .    ***    .    *         CPU: NOVA Stack Machine
