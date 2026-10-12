@@ -1,80 +1,138 @@
 #!/usr/bin/env python3
-"""Generate galaxy.nova — a fastfetch-style galaxy + VM specs program for NOVA.
+"""Generate galaxy.nova — fastfetch-style tilted spiral galaxy + full VM specs.
 
-Builds the binary directly: code (assembled) + data (raw bytes), with
-patched addresses. The program prints a colored spiral galaxy and VM specs.
+Renders the galaxy mathematically: tilted ellipse, logarithmic spiral arms,
+color gradient (white/yellow core -> blue -> purple -> magenta).
+Mimics real fastfetch output fields.
 """
-import subprocess, struct, os
+import subprocess, struct, os, math, random, re
 
-# ANSI colors
-C = {
-    'blue': '\x1b[34m', 'magenta': '\x1b[35m', 'cyan': '\x1b[36m',
-    'white': '\x1b[37m', 'yellow': '\x1b[33m', 'reset': '\x1b[0m',
-    'bold': '\x1b[1m', 'dim': '\x1b[2m',
-}
+random.seed(42)
 
-# Galaxy art lines (35 chars wide), with color gradients
-# Spiral galaxy: blue outer arms -> magenta -> pink/white core
-GALAXY = [
-    (C['blue'],    "              .  *  .              "),
-    (C['blue'],    "           *     .     *           "),
-    (C['blue'],    "        .    .  *  .    .          "),
-    (C['cyan'],    "     *    .    ***    .    *       "),
-    (C['cyan'],    "   .   .   **^^^^^**   .   .       "),
-    (C['magenta'], "  *  .  **^         ^**  .  *      "),
-    (C['magenta'], "  .  . *^             ^* .  .      "),
-    (C['magenta'], "     *^               ^*          "),
-    (C['yellow'],  "  . *^      @@@      ^* .         "),
-    (C['yellow'],  "  * ^     @@@@@@@     ^ *         "),
-    (C['white'],   "  .^     @@@@@@@@@     ^.         "),
-    (C['white'],   "   ^     @@@@@@@@@     ^          "),
-    (C['white'],   "  .^     @@@@@@@@@     ^.         "),
-    (C['yellow'],  "  * ^     @@@@@@@     ^ *         "),
-    (C['yellow'],  "  . *^      @@@      ^* .         "),
-    (C['magenta'], "     *^               ^*          "),
-    (C['magenta'], "  .  . *^             ^* .  .      "),
-    (C['magenta'], "  *  .  **^         ^**  .  *      "),
-    (C['cyan'],    "   .   .   **^^^^^**   .   .       "),
-    (C['blue'],    "     *    .    ***    .    *       "),
-]
+# ANSI colors - 256 color mode for smooth gradients
+def rgb(r, g, b):
+    return f'\x1b[38;2;{r};{g};{b}m'
 
+RESET = '\x1b[0m'
+BOLD = '\x1b[1m'
+DIM = '\x1b[2m'
+
+# Galaxy rendering: tilted spiral galaxy like the reference image
+W, H = 46, 24
+CX, CY = W / 2, H / 2 - 1
+TILT = math.radians(32)
+
+def render_galaxy():
+    lines = []
+    for y in range(H):
+        row = []
+        for x in range(W):
+            dx = x - CX
+            dy = (y - CY) * 1.5
+            rx = dx * math.cos(TILT) - dy * math.sin(TILT)
+            ry = dx * math.sin(TILT) + dy * math.cos(TILT)
+            # Wider ellipse for the tilted disk look
+            r = math.sqrt((rx / 1.0) ** 2 + (ry / 0.45) ** 2)
+            angle = math.atan2(ry, rx)
+            spiral = 0
+            for arm_offset in [0, math.pi]:
+                expected_angle = (r * 0.42) + arm_offset
+                d_angle = abs((angle - expected_angle + math.pi) % (2 * math.pi) - math.pi)
+                arm_width = 1.1 - r * 0.02
+                if arm_width > 0.2:
+                    arm_strength = max(0, 1 - d_angle / arm_width)
+                    spiral = max(spiral, arm_strength)
+            core = max(0, 1 - r / 5.0)
+            disk = max(0, 1 - r / 21.0)
+            # Stronger arms, brighter disk
+            brightness = core * 1.0 + spiral * disk * 1.2 + disk * 0.35
+            if random.random() < 0.025 and r < 22:
+                brightness = max(brightness, 0.75)
+            if brightness < 0.06:
+                row.append(' ')
+                continue
+            if brightness > 0.9: ch = '@'
+            elif brightness > 0.7: ch = '#'
+            elif brightness > 0.5: ch = '*'
+            elif brightness > 0.3: ch = 'o'
+            elif brightness > 0.15: ch = '.'
+            else: ch = '·'
+            if r < 3:
+                col = rgb(255, 250, 220)
+            elif r < 6:
+                t = (r - 3) / 3
+                col = rgb(int(255 - t*80), int(250 - t*70), int(220 + t*35))
+            elif r < 10:
+                t = (r - 6) / 4
+                col = rgb(int(175 - t*60), int(180 - t*60), 255)
+            elif r < 14:
+                t = (r - 10) / 4
+                col = rgb(int(115 + t*60), int(120 - t*30), int(255 - t*40))
+            else:
+                t = min(1, (r - 14) / 6)
+                col = rgb(int(175 + t*40), int(90 - t*20), int(215 - t*30))
+            row.append(col + ch + RESET)
+        lines.append(''.join(row).rstrip())
+    return lines
+
+GALAXY = render_galaxy()
+
+# Fastfetch-style specs
 SPECS = [
-    ((C['bold'] + C['cyan'], "sean@nova"),),
-    ((C['dim'],              "─────────────────"),),
-    ((C['bold'], "OS: "),      (C['reset'], "NOVA Firmware v0.0.1")),
-    ((C['bold'], "CPU: "),     (C['reset'], "NOVA Stack Machine")),
-    ((C['bold'], "Arch: "),    (C['reset'], "nova64 (64-bit)")),
-    ((C['bold'], "Cores: "),   (C['reset'], "8 (4P+4E)")),
-    ((C['bold'], "Memory: "),  (C['reset'], "256 MB / 1024 MB")),
-    ((C['bold'], "ISA: "),     (C['reset'], "Stack-based, 1-9 byte")),
-    ((C['bold'], "Stacks: "),  (C['reset'], "Data, Call, Exc, Vector")),
-    ((C['bold'], "Regs: "),    (C['reset'], "R0-R15 (16x64-bit)")),
-    ((C['bold'], "Priv: "),    (C['reset'], "4 levels")),
-    ((C['bold'], "MMU: "),     (C['reset'], "3-level paging")),
-    ((C['bold'], "Crypto: "),  (C['reset'], "AES-256, SHA-256")),
-    (("", ""),),
-    ((C['dim'], "Built with Muse"),),
+    ("title", "sean@nova"),
+    ("sep", "─────────────────────────────────"),
+    ("OS", "NOVA Firmware v0.0.4"),
+    ("Host", "NovaVM (iOS App)"),
+    ("Kernel", "NOVA-64"),
+    ("Uptime", "0 mins"),
+    ("Packages", "1 (nova)"),
+    ("Shell", "novash 1.0"),
+    ("Display", "2360x1640 @ 120Hz"),
+    ("DE", "NovaUI"),
+    ("WM", "NovaWM"),
+    ("Theme", "Galaxy [Dark]"),
+    ("Terminal", "NovaVM Console"),
+    ("CPU", "NOVA Stack Machine (8)"),
+    ("GPU", "Apple M3"),
+    ("Memory", "64MB / 1024MB"),
+    ("Disk", "NOVA/ (Files app)"),
+    ("", ""),
+    ("Colors", "256-color ANSI"),
 ]
 
-# Build the output text: galaxy left, specs right
+def format_spec(label, value):
+    if label == "title":
+        return f"{BOLD}{rgb(100,200,255)}{value}{RESET}"
+    elif label == "sep":
+        return f"{DIM}{value}{RESET}"
+    elif label == "":
+        return ""
+    else:
+        return f"{BOLD}{rgb(100,200,255)}{label}:{RESET} {value}"
+
+def visible_len(s):
+    return len(re.sub(r'\x1b\[[0-9;]*m', '', s))
+
 lines = []
+max_galaxy_w = max(visible_len(l) for l in GALAXY)
 for i in range(max(len(GALAXY), len(SPECS))):
-    art = ""
-    if i < len(GALAXY):
-        color, text = GALAXY[i]
-        art = color + text + C['reset']
+    gal = GALAXY[i] if i < len(GALAXY) else ""
     spec = ""
     if i < len(SPECS):
-        parts = SPECS[i]
-        # Each entry is a tuple of (color, text) pairs
-        spec = "".join(c + t for c, t in parts) + C['reset']
-    lines.append(art + "  " + spec)
+        label, value = SPECS[i]
+        spec = format_spec(label, value)
+    pad = max_galaxy_w - visible_len(gal) + 3
+    lines.append(gal + " " * pad + spec)
 
 output = "\n".join(lines) + "\n"
 data = output.encode('utf-8')
-print(f"Data size: {len(data)} bytes, {len(lines)} lines")
+print(f"Data: {len(data)} bytes, {len(lines)} lines")
 
-# Assembly code (with placeholders for ADDR and LEN)
+print("\nPreview (colors stripped):")
+for l in lines[:14]:
+    clean = re.sub(r'\x1b\[[0-9;]*m', '', l)
+    print(clean[:85])
+
 asm = """
 main:
     PUSH64 0xDEADBEEFCAFEBABE
@@ -104,60 +162,43 @@ done:
     WFI
 """
 
-with open("/tmp/galaxy_asm.nova", "w") as f:
+with open("/tmp/galaxy2_asm.nova", "w") as f:
     f.write(asm)
 
-# Assemble
 result = subprocess.run(
     ["python3", os.path.expanduser("~/workspace/nova-cpu/novas.py"),
-     "/tmp/galaxy_asm.nova", "-o", "/tmp/galaxy_code.bin"],
+     "/tmp/galaxy2_asm.nova", "-o", "/tmp/galaxy2_code.bin"],
     capture_output=True, text=True
 )
 if result.returncode != 0:
-    print("Assembly failed:")
-    print(result.stderr)
+    print("Assembly failed:", result.stderr)
     exit(1)
 
-with open("/tmp/galaxy_code.bin", "rb") as f:
+with open("/tmp/galaxy2_code.bin", "rb") as f:
     code = f.read()
-print(f"Code size: {len(code)} bytes")
+print(f"\nCode: {len(code)} bytes")
 
-# Program loads at 0x1000 (with firmware) — data follows code
 LOAD_ADDR = 0x1000
 data_addr = LOAD_ADDR + len(code)
 
-# Patch placeholders
-# PUSH64 is 0x04 + 8 bytes LE
 def patch_push64(code, placeholder, value):
     ph_bytes = struct.pack("<Q", placeholder)
     val_bytes = struct.pack("<Q", value)
-    # Find PUSH64 (0x04) followed by placeholder
-    idx = 0
-    count = 0
+    idx, count = 0, 0
     while True:
         i = code.find(b'\x04' + ph_bytes, idx)
-        if i == -1:
-            break
+        if i == -1: break
         code = code[:i+1] + val_bytes + code[i+9:]
         count += 1
         idx = i + 9
     return code, count
 
-code, c1 = patch_push64(code, 0xDEADBEEFCAFEBABE, 0xFFFFFFFFFFFF0000)  # console
-code, c2 = patch_push64(code, 0xFEEDFACEDEADBEEF, data_addr)          # data addr
-code, c3 = patch_push64(code, 0xAAAAAAAAAAAAAAAA, len(data))          # data len
-print(f"Patched {c1+c2+c3} addresses (console, data_addr=0x{data_addr:x}, len={len(data)})")
+code, _ = patch_push64(code, 0xDEADBEEFCAFEBABE, 0xFFFFFFFFFFFF0000)
+code, _ = patch_push64(code, 0xFEEDFACEDEADBEEF, data_addr)
+code, _ = patch_push64(code, 0xAAAAAAAAAAAAAAAA, len(data))
 
-# Final binary
 binary = code + data
-out_path = os.path.expanduser("~/workspace/nova-cpu/examples/galaxy.bin")
-with open(out_path, "wb") as f:
+out = os.path.expanduser("~/workspace/nova-programs/galaxy/galaxy.bin")
+with open(out, "wb") as f:
     f.write(binary)
-print(f"Wrote {out_path} ({len(binary)} bytes)")
-
-# Also save the .nova source for reference
-with open(os.path.expanduser("~/workspace/nova-cpu/examples/galaxy.nova"), "w") as f:
-    f.write("; galaxy.nova — fastfetch-style galaxy + NOVA VM specs\n")
-    f.write("; Generated by gen_galaxy.py — do not hand-edit, see generator\n")
-    f.write(asm)
-print("Done")
+print(f"Wrote {out} ({len(binary)} bytes)")
