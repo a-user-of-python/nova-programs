@@ -92,7 +92,7 @@ SPECS = [
     ("WM", "NovaWM"),
     ("Theme", "Galaxy [Dark]"),
     ("Terminal", "NovaVM Console"),
-    ("CPU", "NOVA Stack Machine (8)"),
+    ("CPU", "Nova-1 (8)"),
     ("GPU", "Apple M3"),
     ("Memory", "64MB / 1024MB"),
     ("Disk", "NOVA/ (Files app)"),
@@ -147,7 +147,6 @@ loop:
     PUSHR 1
     LOADU8
     PUSHR 0
-    SWAP
     STORE8
     PUSHR 1
     PUSH8 1
