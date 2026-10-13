@@ -143,6 +143,6 @@ delay_loop:
     PUSHR 3
     PUSH8 0
     EQ
-    BNZ delay_loop
+    BZ delay_loop
 
     JMP loop
