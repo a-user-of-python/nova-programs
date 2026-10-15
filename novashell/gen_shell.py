@@ -1953,7 +1953,15 @@ ep_done:
 ed_display:
     PUSH64 @EDIT_NLINES@
     LOAD64
-    POPR 12
+    POPR 12                    ; R12 = nlines
+    ; Defensive: cap at 64
+    PUSHR 12
+    PUSH8 64
+    LTU                        ; nlines < 64?
+    BNZ ed_d_ok                ; yes, keep it
+    PUSH8 64
+    POPR 12                    ; no, cap at 64
+ed_d_ok:
     PUSH8 0
     POPR 13
 ed_d_loop:
