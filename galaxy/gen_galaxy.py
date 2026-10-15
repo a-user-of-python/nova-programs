@@ -158,7 +158,7 @@ loop:
     POPR 2
     JMP loop
 done:
-    WFI
+    JMP done
 """
 
 with open("/tmp/galaxy2_asm.nova", "w") as f:
