@@ -17,7 +17,11 @@ MAX_SIZE = 65536
 
 # (name, python-string) — NUL-terminated in the image, 8-byte padded
 STRINGS = [
-    ("S_banner", "NovaShell v1.0 -- NOVA firmware shell\nType 'help' for a command list.\n"),
+    ("S_banner", "NovaShell v1.0 -- NOVA firmware shell\n"),
+    ("S_banner2", "Type 'help' for a command list.\n"),
+    ("S_datestr", "Date: "),
+    ("S_timestr", "   Time: "),
+    ("S_utcstr", " UTC\n"),
     ("S_prompt", "nova> "),
     ("S_help",
      "Commands:\n"
@@ -169,6 +173,13 @@ bss_zero_done:
     ; Process table for 2-program scheduler (firmware not counted).
     ; Process table zeroed at boot (see bss_zero above); all slots FREE.
     PUSH64 @S_banner@
+    CALL print_str
+    ; ---- Auto-sync date/time at boot (quick 5s timeout; skip if offline) ----
+    CALL date_sync
+    BZ boot_no_date
+    CALL print_date_time
+boot_no_date:
+    PUSH64 @S_banner2@
     CALL print_str
     JMP main_loop
 
@@ -624,84 +635,22 @@ do_uname:
     JMP main_loop
 
 do_date:
-    ; Sync wall-clock time over HTTP, cache in DATETIME, print it.
+    ; Manual sync uses the full timeout, then parses and prints.
     PUSH64 @S_timeapi@
+    PUSH8 1
     CALL net_get
     POPR 11
     PUSHR 11
     PUSH64 0xFFFFFFFFFFFFFFFF
     EQ
     BNZ date_fail
-    ; Scan the 16KB response buffer for "dateTime":"
-    PUSH64 0x4000
-    POPR 11
-date_scan:
     PUSHR 11
-    LOADU8
-    BZ date_fail
-    PUSHR 11
-    POPR 13                    ; R13 = save scan cursor (startswith clobbers R11)
-    PUSHR 11
-    PUSH64 @S_datetime_key@
-    CALL startswith
-    PUSHR 13
-    POPR 11                    ; R11 = restore scan cursor
-    BNZ date_found
-    PUSHR 11
-    INC
-    POPR 11
-    JMP date_scan
-date_found:
-    PUSH8 12
-    PUSHR 11
-    ADD
-    POPR 11                    ; R11 = value start
-    PUSH64 @DATETIME@
-    POPR 12                    ; R12 = dest
-    PUSH8 47
-    POPR 14                    ; R14 = remaining
-date_copy:
-    PUSHR 14
-    BZ date_copy_done
-    PUSHR 11
-    LOADU8
-    DUP
-    BZ date_copy_done
-    DUP
-    PUSH8 10
-    EQ
-    BNZ date_copy_done
-    DUP
-    PUSH8 34
-    EQ
-    BNZ date_copy_done         ; stop at closing quote
-    DUP
-    PUSH8 46
-    EQ
-    BNZ date_copy_done         ; stop at '.' (drop fractional seconds)
-    POPR 13
-    PUSHR 13
-    PUSHR 12
-    STORE8
-    PUSHR 11
-    INC
-    POPR 11
-    PUSHR 12
-    INC
-    POPR 12
-    PUSHR 14
-    PUSH8 1
-    SUB
-    POPR 14
-    JMP date_copy
-date_copy_done:
-    POP
     PUSH8 0
-    PUSHR 12
-    STORE8
-    PUSH64 @DATETIME@
-    CALL print_str
-    CALL print_newline
+    EQ
+    BNZ date_fail
+    CALL date_parse_buf
+    BZ date_fail
+    CALL print_date_time
     JMP main_loop
 date_fail:
     PUSH64 @S_datefail@
@@ -1123,9 +1072,11 @@ kill_usage:
     CALL print_str
     JMP main_loop
 
-; ---------- net_get: url_addr -> n (bytes written, or -1) ----------
+; ---------- net_get: url cmd -> n (bytes written, or -1) ----------
 ; Drives the app's MMIO network device. Pure Nova machine code.
+; cmd=1: full GET (20s timeout), cmd=2: quick GET (5s timeout).
 net_get:
+    POPR 12                    ; R12 = cmd
     POPR 11                    ; R11 = url
     PUSHR 11
     PUSH64 0xFFFFFFFFFFFF0060  ; netUrl
@@ -1136,11 +1087,148 @@ net_get:
     PUSH16 16384
     PUSH64 0xFFFFFFFFFFFF0070  ; netBufSize
     STORE64
-    PUSH8 1
-    PUSH64 0xFFFFFFFFFFFF0058  ; netCmd = GET (blocks like a syscall)
+    PUSHR 12
+    PUSH64 0xFFFFFFFFFFFF0058  ; netCmd (blocks like a syscall)
     STORE64
     PUSH64 0xFFFFFFFFFFFF0078  ; netResult
     LOAD64
+    RET
+
+; ---------- date_parse_buf: -> flag (1=ok, 0=fail) ----------
+; Parses the 16KB response buffer at 0x4000 into DATETIME.
+date_parse_buf:
+    PUSH64 0x4000
+    POPR 11
+dpb_scan:
+    PUSHR 11
+    LOADU8
+    BZ dpb_fail
+    PUSHR 11
+    POPR 13
+    PUSHR 11
+    PUSH64 @S_datetime_key@
+    CALL startswith
+    PUSHR 13
+    POPR 11
+    BNZ dpb_found
+    PUSHR 11
+    INC
+    POPR 11
+    JMP dpb_scan
+dpb_found:
+    PUSH8 12
+    PUSHR 11
+    ADD
+    POPR 11
+    PUSH64 @DATETIME@
+    POPR 12
+    PUSH8 47
+    POPR 14
+dpb_copy:
+    PUSHR 14
+    BZ dpb_copy_done
+    PUSHR 11
+    LOADU8
+    DUP
+    BZ dpb_copy_done
+    DUP
+    PUSH8 10
+    EQ
+    BNZ dpb_copy_done
+    DUP
+    PUSH8 34
+    EQ
+    BNZ dpb_copy_done
+    DUP
+    PUSH8 46
+    EQ
+    BNZ dpb_copy_done
+    POPR 13
+    PUSHR 13
+    PUSHR 12
+    STORE8
+    PUSHR 11
+    INC
+    POPR 11
+    PUSHR 12
+    INC
+    POPR 12
+    PUSHR 14
+    PUSH8 1
+    SUB
+    POPR 14
+    JMP dpb_copy
+dpb_copy_done:
+    POP
+    PUSH8 0
+    PUSHR 12
+    STORE8
+    PUSH8 1
+    RET
+dpb_fail:
+    PUSH8 0
+    RET
+
+; ---------- date_sync: -> flag (1=ok, 0=fail) ----------
+; Fetches real UTC time (quick timeout) and caches it in DATETIME.
+; No output. Used at boot and by the date command.
+date_sync:
+    PUSH64 @S_timeapi@
+    PUSH8 2
+    CALL net_get
+    POPR 11
+    PUSHR 11
+    PUSH64 0xFFFFFFFFFFFFFFFF
+    EQ
+    BNZ ds_fail
+    PUSHR 11
+    PUSH8 0
+    EQ
+    BNZ ds_fail                ; 0 bytes = fail
+    CALL date_parse_buf
+    RET
+ds_fail:
+    PUSH8 0
+    RET
+
+; ---------- print_date_time: -> (prints "Date: <d>   Time: <t> UTC") ----------
+print_date_time:
+    PUSH64 @S_datestr@
+    CALL print_str
+    PUSH64 @DATETIME@
+    POPR 11
+pdt_loop:
+    PUSHR 11
+    LOADU8
+    DUP
+    BZ pdt_end
+    DUP
+    PUSH8 84                   ; 'T'
+    EQ
+    BNZ pdt_time
+    PUSHR 0
+    STORE8
+    PUSHR 11
+    INC
+    POPR 11
+    JMP pdt_loop
+pdt_time:
+    POP                        ; drop 'T'
+    PUSHR 11
+    POPR 13                    ; R13 = save pos (print_str clobbers R11)
+    PUSH64 @S_timestr@
+    CALL print_str
+    PUSHR 13
+    PUSH8 1
+    ADD
+    POPR 11
+    PUSHR 11
+    CALL print_str
+    PUSH64 @S_utcstr@
+    CALL print_str
+    RET
+pdt_end:
+    POP
     RET
 
 ; ---------- do_fetch: HTTP(S) GET a URL and print the body ----------
@@ -1149,6 +1237,7 @@ do_fetch:
     LOADU8
     BZ fetch_usage
     PUSH64 @TOK1@
+    PUSH8 1
     CALL net_get
     POPR 11
     PUSHR 11
