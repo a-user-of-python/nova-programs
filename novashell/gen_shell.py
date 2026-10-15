@@ -663,8 +663,8 @@ do_uname:
 do_date:
     ; Manual sync uses the full timeout, then parses and prints.
     ; Build URL from config like date_sync.
-    PUSH64 @CFG_DATE_API@
     PUSH64 @URL_BUF@
+    PUSH64 @CFG_DATE_API@
     CALL strcpy
     PUSH64 @URL_BUF@
     CALL strlen
@@ -1238,8 +1238,8 @@ dpb_fail:
 ; and caches it in DATETIME. No output. Used at boot and by date.
 date_sync:
     ; Build URL: CFG_DATE_API + CFG_TIMEZONE -> URL_BUF
-    PUSH64 @CFG_DATE_API@
     PUSH64 @URL_BUF@
+    PUSH64 @CFG_DATE_API@
     CALL strcpy
     PUSH64 @URL_BUF@
     CALL strlen
@@ -1556,14 +1556,14 @@ cp_done:
 
 ; ---------- load_config: read novash.cfg or write defaults ----------
 load_config:
-    PUSH64 @S_dutz@
     PUSH64 @CFG_TIMEZONE@
+    PUSH64 @S_dutz@
     CALL strcpy
-    PUSH64 @S_dupt@
     PUSH64 @CFG_PROMPT@
+    PUSH64 @S_dupt@
     CALL strcpy
-    PUSH64 @S_duapi@
     PUSH64 @CFG_DATE_API@
+    PUSH64 @S_duapi@
     CALL strcpy
     PUSH64 @S_cfg_name@
     PUSH64 0x4000
