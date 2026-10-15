@@ -177,7 +177,7 @@ with open("/tmp/galaxy2_code.bin", "rb") as f:
     code = f.read()
 print(f"\nCode: {len(code)} bytes")
 
-LOAD_ADDR = 0x1000
+LOAD_ADDR = 0x10000
 data_addr = LOAD_ADDR + len(code)
 
 def patch_push64(code, placeholder, value):
