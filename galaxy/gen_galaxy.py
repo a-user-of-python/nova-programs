@@ -84,7 +84,8 @@ SPECS = [
     ("OS", "NOVA Firmware v0.0.4"),
     ("Host", "NovaVM (iOS App)"),
     ("Kernel", "NOVA-64"),
-    ("Uptime", "0 mins"),
+    ("Uptime", "__DYN_UPTIME__"),
+    ("Date", "__DYN_DATE__"),
     ("Packages", "1 (nova)"),
     ("Shell", "novash 1.0"),
     ("Display", "2360x1640 @ 120Hz"),
@@ -107,6 +108,8 @@ def format_spec(label, value):
         return f"{DIM}{value}{RESET}"
     elif label == "":
         return ""
+    elif value.startswith("__DYN_"):
+        return f"{BOLD}{rgb(100,200,255)}{label}:{RESET}"
     else:
         return f"{BOLD}{rgb(100,200,255)}{label}:{RESET} {value}"
 
@@ -124,9 +127,20 @@ for i in range(max(len(GALAXY), len(SPECS))):
     pad = max_galaxy_w - visible_len(gal) + 3
     lines.append(gal + " " * pad + spec)
 
-output = "\n".join(lines) + "\n"
-data = output.encode('utf-8')
-print(f"Data: {len(data)} bytes, {len(lines)} lines")
+# Split into 3 parts around the dynamic Uptime/Date lines.
+# part1 ends after the "Uptime:" label (no newline); code prints " N seconds\n".
+# part2 spans from the next line through the "Date:" label; code prints " <datetime>\n".
+# part3 is the remainder.
+idx_u = next(i for i, (l, v) in enumerate(SPECS) if v == "__DYN_UPTIME__")
+idx_d = next(i for i, (l, v) in enumerate(SPECS) if v == "__DYN_DATE__")
+part1 = "\n".join(lines[:idx_u+1])
+part2 = "\n" + "\n".join(lines[idx_u+1:idx_d+1])
+part3 = "\n" + "\n".join(lines[idx_d+1:]) + "\n"
+data1 = part1.encode('utf-8')
+data2 = part2.encode('utf-8')
+data3 = part3.encode('utf-8')
+data = data1 + data2 + data3
+print(f"Data: {len(data)} bytes ({len(data1)}+{len(data2)}+{len(data3)}), {len(lines)} lines")
 
 print("\nPreview (colors stripped):")
 for l in lines[:14]:
@@ -135,17 +149,105 @@ for l in lines[:14]:
 
 asm = """
 main:
+    ; R15 = load address (firmware sets it). Data parts follow the code.
     PUSH64 0xDEADBEEFCAFEBABE
-    POPR 0
+    POPR 0                      ; R0 = console MMIO
+    ; ---- memcpy part1 ----
     PUSHR 15
     PUSH64 0xFEEDFACEDEADBEEF
     ADD
-    POPR 1
+    POPR 1                      ; R1 = src
     PUSH64 0xAAAAAAAAAAAAAAAA
+    POPR 2                      ; R2 = len
+    CALL memcpy
+    ; ---- print " <uptime_secs> seconds" ----
+    PUSH8 32
+    PUSHR 0
+    STORE8
+    PUSH64 0x1E50
+    LOAD64
+    PUSH8 10
+    DIVU
+    CALL print_u64
+    PUSHR 0
+    POPR 3                      ; R3 = console (print_str clobbers R0? no, keep simple)
+    PUSH8 32
+    PUSHR 0
+    STORE8
+    ; "seconds"
+    PUSH8 115
+    PUSHR 0
+    STORE8
+    PUSH8 101
+    PUSHR 0
+    STORE8
+    PUSH8 99
+    PUSHR 0
+    STORE8
+    PUSH8 111
+    PUSHR 0
+    STORE8
+    PUSH8 110
+    PUSHR 0
+    STORE8
+    PUSH8 100
+    PUSHR 0
+    STORE8
+    PUSH8 115
+    PUSHR 0
+    STORE8
+    PUSH8 10
+    PUSHR 0
+    STORE8
+    ; ---- memcpy part2 ----
+    PUSHR 15
+    PUSH64 0xBBBBBBBBBBBBBBBB
+    ADD
+    POPR 1
+    PUSH64 0xCCCCCCCCCCCCCCCC
     POPR 2
-loop:
+    CALL memcpy
+    ; ---- print " <datetime>" ----
+    PUSH8 32
+    PUSHR 0
+    STORE8
+    PUSH64 0x1E58
+    POPR 1                      ; R1 = datetime str
+pr_date:
+    PUSHR 1
+    LOADU8
+    DUP
+    BZ pr_date_done
+    PUSHR 0
+    STORE8
+    PUSHR 1
+    PUSH8 1
+    ADD
+    POPR 1
+    JMP pr_date
+pr_date_done:
+    POP
+    PUSH8 10
+    PUSHR 0
+    STORE8
+    ; ---- memcpy part3 ----
+    PUSHR 15
+    PUSH64 0xDDDDDDDDDDDDDDDD
+    ADD
+    POPR 1
+    PUSH64 0xEEEEEEEEEEEEEEEE
+    POPR 2
+    CALL memcpy
+done:
+    ECALL
+
+; memcpy: R0=console, R1=src, R2=len
+memcpy:
     PUSHR 2
-    BZ done
+    BZ memcpy_done
+mc_loop:
+    PUSHR 2
+    BZ memcpy_done
     PUSHR 1
     LOADU8
     PUSHR 0
@@ -158,9 +260,56 @@ loop:
     PUSH8 1
     SUB
     POPR 2
-    JMP loop
-done:
-    ECALL
+    JMP mc_loop
+memcpy_done:
+    RET
+
+; print_u64: u64 on stack -> decimal to console (R0)
+print_u64:
+    POPR 11                     ; R11 = value
+    PUSH8 0
+    POPR 12                     ; R12 = digit count
+    PUSHR 11
+    PUSH8 0
+    EQ
+    BZ pu_digits
+    PUSH8 48                    ; '0'
+    PUSH8 1
+    POPR 12
+    JMP pu_print
+pu_digits:
+    PUSHR 11
+    PUSH8 0
+    EQ
+    BNZ pu_print
+    PUSHR 11
+    PUSH8 10
+    REMU
+    PUSH8 48
+    ADD
+    PUSHR 11
+    PUSH8 10
+    DIVU
+    POPR 11
+    PUSHR 12
+    PUSH8 1
+    ADD
+    POPR 12
+    JMP pu_digits
+pu_print:
+    PUSHR 12
+    BZ pu_done
+    POPR 11
+    PUSHR 11
+    PUSHR 0
+    STORE8
+    PUSHR 12
+    PUSH8 1
+    SUB
+    POPR 12
+    JMP pu_print
+pu_done:
+    RET
 """
 
 with open("/tmp/galaxy2_asm.nova", "w") as f:
@@ -180,7 +329,10 @@ with open("/tmp/galaxy2_code.bin", "rb") as f:
 print(f"\nCode: {len(code)} bytes")
 
 LOAD_ADDR = 0x10000
-data_addr = LOAD_ADDR + len(code)
+code_len = len(code)
+d1_addr = LOAD_ADDR + code_len
+d2_addr = d1_addr + len(data1)
+d3_addr = d2_addr + len(data2)
 
 def patch_push64(code, placeholder, value):
     ph_bytes = struct.pack("<Q", placeholder)
@@ -195,10 +347,14 @@ def patch_push64(code, placeholder, value):
     return code, count
 
 code, _ = patch_push64(code, 0xDEADBEEFCAFEBABE, 0xFFFFFFFFFFFF0000)
-code, _ = patch_push64(code, 0xFEEDFACEDEADBEEF, len(code))
-code, _ = patch_push64(code, 0xAAAAAAAAAAAAAAAA, len(data))
+code, _ = patch_push64(code, 0xFEEDFACEDEADBEEF, code_len)       # part1 offset
+code, _ = patch_push64(code, 0xAAAAAAAAAAAAAAAA, len(data1))
+code, _ = patch_push64(code, 0xBBBBBBBBBBBBBBBB, code_len + len(data1))  # part2 offset
+code, _ = patch_push64(code, 0xCCCCCCCCCCCCCCCC, len(data2))
+code, _ = patch_push64(code, 0xDDDDDDDDDDDDDDDD, code_len + len(data1) + len(data2))  # part3
+code, _ = patch_push64(code, 0xEEEEEEEEEEEEEEEE, len(data3))
 
-binary = code + data
+binary = code + data1 + data2 + data3
 out = os.path.expanduser("~/workspace/nova-programs/galaxy/galaxy.bin")
 with open(out, "wb") as f:
     f.write(binary)

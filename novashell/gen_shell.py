@@ -36,7 +36,8 @@ STRINGS = [
      "  clear         clear screen\n"
      "  ver           firmware version\n"
      "  env           show environment\n"
-     "  history       command history\n"),
+     "  history       command history\n"
+     "  fetch <url>   fetch URL over HTTP(S)\n"),
     ("S_unknown", "unknown command: "),
     ("S_catuse", "usage: cat <file>\n"),
     ("S_runuse", "usage: run <file>\n"),
@@ -70,6 +71,13 @@ STRINGS = [
     ("S_killuse", "usage: kill <pid>\n"),
     ("S_killdone", "killed\n"),
     ("S_killfail", "kill failed\n"),
+    ("S_c_fetch", "fetch"),
+    ("S_fetchuse", "usage: fetch <url>\n"),
+    ("S_fetchfail", "fetch failed\n"),
+    ("S_timeapi", "https://timeapi.io/api/Time/current/zone?timeZone=UTC"),
+    ("S_datetime_key", "\"dateTime\":\""),
+    ("S_datefail", "date sync failed\n"),
+    ("S_seconds", " seconds\n"),
     ("S_noslot", "no free process slot\n"),
     ("S_ps_header", "  PID TTY          CMD\n"),
     ("S_ps_indent", "    "),
@@ -87,6 +95,8 @@ BUFFERS = [
     ("PROC_TABLE", 1584), # 9 slots x 176 bytes (0-7 programs, 8 shell)
     ("CUR_PID", 8),      # current process ID
     ("HANDLER_SCRATCH", 40), # 5 x 8 bytes for R11-R15 in timer handler
+    ("UPTIME", 8),            # 64-bit tick counter, incremented every timer tick
+    ("DATETIME", 48),         # cached date/time string from network sync
 ]
 
 CODE = r"""
@@ -101,10 +111,10 @@ CODE = r"""
 _start:
     ; ---- Zero all BSS buffers (do NOT rely on VM zeroing memory) ----
     ; LINE_BUF(128)+TOK0(16)+TOK1(64)+IO_BUF(384)+HIST_BUF(640)
-    ; +PROC_TABLE(1584)+CUR_PID(8)+HANDLER_SCRATCH(40) = 2864 bytes = 358 qwords
+    ; +PROC_TABLE(1584)+CUR_PID(8)+HANDLER_SCRATCH(40)+UPTIME(8)+DATETIME(48) = 2920 bytes = 365 qwords
     PUSH64 @LINE_BUF@
     POPR 11                    ; R11 = addr
-    PUSH16 358
+    PUSH16 365
     POPR 12                    ; R12 = qword count
 bss_zero:
     PUSHR 12
@@ -565,6 +575,10 @@ hdone:
     CALL streq
     BNZ do_kill
     PUSH64 @TOK0@
+    PUSH64 @S_c_fetch@
+    CALL streq
+    BNZ do_fetch
+    PUSH64 @TOK0@
     PUSH64 @S_c_env@
     CALL streq
     BNZ do_env
@@ -610,12 +624,97 @@ do_uname:
     JMP main_loop
 
 do_date:
-    PUSH64 @S_date_t@
+    ; Sync wall-clock time over HTTP, cache in DATETIME, print it.
+    PUSH64 @S_timeapi@
+    CALL net_get
+    POPR 11
+    PUSHR 11
+    PUSH64 0xFFFFFFFFFFFFFFFF
+    EQ
+    BNZ date_fail
+    ; Scan the 16KB response buffer for "dateTime":"
+    PUSH64 0x4000
+    POPR 11
+date_scan:
+    PUSHR 11
+    LOADU8
+    BZ date_fail
+    PUSHR 11
+    POPR 13                    ; R13 = save scan cursor (startswith clobbers R11)
+    PUSHR 11
+    PUSH64 @S_datetime_key@
+    CALL startswith
+    PUSHR 13
+    POPR 11                    ; R11 = restore scan cursor
+    BNZ date_found
+    PUSHR 11
+    INC
+    POPR 11
+    JMP date_scan
+date_found:
+    PUSH8 12
+    PUSHR 11
+    ADD
+    POPR 11                    ; R11 = value start
+    PUSH64 @DATETIME@
+    POPR 12                    ; R12 = dest
+    PUSH8 47
+    POPR 14                    ; R14 = remaining
+date_copy:
+    PUSHR 14
+    BZ date_copy_done
+    PUSHR 11
+    LOADU8
+    DUP
+    BZ date_copy_done
+    DUP
+    PUSH8 10
+    EQ
+    BNZ date_copy_done
+    DUP
+    PUSH8 34
+    EQ
+    BNZ date_copy_done         ; stop at closing quote
+    DUP
+    PUSH8 46
+    EQ
+    BNZ date_copy_done         ; stop at '.' (drop fractional seconds)
+    POPR 13
+    PUSHR 13
+    PUSHR 12
+    STORE8
+    PUSHR 11
+    INC
+    POPR 11
+    PUSHR 12
+    INC
+    POPR 12
+    PUSHR 14
+    PUSH8 1
+    SUB
+    POPR 14
+    JMP date_copy
+date_copy_done:
+    POP
+    PUSH8 0
+    PUSHR 12
+    STORE8
+    PUSH64 @DATETIME@
+    CALL print_str
+    CALL print_newline
+    JMP main_loop
+date_fail:
+    PUSH64 @S_datefail@
     CALL print_str
     JMP main_loop
 
 do_uptime:
-    PUSH64 @S_uptime_t@
+    PUSH64 @UPTIME@
+    LOAD64
+    PUSH8 10
+    DIVU                       ; ~10 ticks/sec -> seconds
+    CALL print_uint64
+    PUSH64 @S_seconds@
     CALL print_str
     JMP main_loop
 
@@ -1024,6 +1123,136 @@ kill_usage:
     CALL print_str
     JMP main_loop
 
+; ---------- net_get: url_addr -> n (bytes written, or -1) ----------
+; Drives the app's MMIO network device. Pure Nova machine code.
+net_get:
+    POPR 11                    ; R11 = url
+    PUSHR 11
+    PUSH64 0xFFFFFFFFFFFF0060  ; netUrl
+    STORE64
+    PUSH64 0x4000
+    PUSH64 0xFFFFFFFFFFFF0068  ; netBuf
+    STORE64
+    PUSH16 16384
+    PUSH64 0xFFFFFFFFFFFF0070  ; netBufSize
+    STORE64
+    PUSH8 1
+    PUSH64 0xFFFFFFFFFFFF0058  ; netCmd = GET (blocks like a syscall)
+    STORE64
+    PUSH64 0xFFFFFFFFFFFF0078  ; netResult
+    LOAD64
+    RET
+
+; ---------- do_fetch: HTTP(S) GET a URL and print the body ----------
+do_fetch:
+    PUSH64 @TOK1@
+    LOADU8
+    BZ fetch_usage
+    PUSH64 @TOK1@
+    CALL net_get
+    POPR 11
+    PUSHR 11
+    PUSH64 0xFFFFFFFFFFFFFFFF
+    EQ
+    BNZ fetch_failed
+    PUSHR 11
+    PUSH64 0x4000
+    ADD
+    POPR 12
+    PUSH8 0
+    PUSHR 12
+    STORE8                     ; NUL-terminate
+    PUSH64 0x4000
+    CALL print_str
+    CALL print_newline
+    JMP main_loop
+fetch_failed:
+    PUSH64 @S_fetchfail@
+    CALL print_str
+    JMP main_loop
+fetch_usage:
+    PUSH64 @S_fetchuse@
+    CALL print_str
+    JMP main_loop
+
+; ---------- startswith: hay needle -> 1 if hay starts with needle ----------
+startswith:
+    POPR 12                    ; R12 = needle
+    POPR 11                    ; R11 = hay
+sw_loop:
+    PUSHR 12
+    LOADU8
+    DUP
+    BZ sw_yes
+    PUSHR 11
+    LOADU8
+    EQ
+    BZ sw_no
+    PUSHR 11
+    INC
+    POPR 11
+    PUSHR 12
+    INC
+    POPR 12
+    JMP sw_loop
+sw_yes:
+    POP
+    PUSH8 1
+    RET
+sw_no:
+    PUSH8 0
+    RET
+
+; ---------- print_uint64: u64 -> (decimal) ----------
+print_uint64:
+    POPR 11                    ; R11 = value
+    PUSH64 @IO_BUF@
+    PUSH8 32
+    ADD
+    POPR 12                    ; R12 = cursor
+    PUSH8 0
+    PUSHR 12
+    STORE8
+    PUSHR 11
+    PUSH8 0
+    EQ
+    BZ pu64_loop
+    PUSHR 12
+    PUSH8 1
+    SUB
+    POPR 12
+    PUSH8 48
+    PUSHR 12
+    STORE8
+    JMP pu64_done
+pu64_loop:
+    PUSHR 11
+    PUSH8 0
+    EQ
+    BNZ pu64_done
+    PUSHR 11
+    PUSH8 10
+    REMU
+    PUSH8 48
+    ADD
+    POPR 13
+    PUSHR 12
+    PUSH8 1
+    SUB
+    POPR 12
+    PUSHR 13
+    PUSHR 12
+    STORE8
+    PUSHR 11
+    PUSH8 10
+    DIVU
+    POPR 11
+    JMP pu64_loop
+pu64_done:
+    PUSHR 12
+    CALL print_str
+    RET
+
 ; ================= Timer Handler: preemptive context switch =================
 ; On entry (from VM): data stack has [epc, cause] (cause on top).
 ; Interrupts are disabled by the VM; MRET re-enables them.
@@ -1053,6 +1282,15 @@ timer_handler:
     PUSH64 @HANDLER_SCRATCH@
     PUSH8 32
     ADD
+    STORE64
+    ; ---- Uptime tick ----
+    PUSH64 @UPTIME@
+    LOAD64
+    PUSH8 1
+    ADD
+    POPR 11
+    PUSHR 11
+    PUSH64 @UPTIME@
     STORE64
     ; ---- Pop trap frame ----
     POPR 15                    ; cause
