@@ -160,7 +160,7 @@ loop:
     POPR 2
     JMP loop
 done:
-    JMP done
+    ECALL
 """
 
 with open("/tmp/galaxy2_asm.nova", "w") as f:

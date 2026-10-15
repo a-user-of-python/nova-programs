@@ -1055,8 +1055,32 @@ timer_handler:
     ADD
     STORE64
     ; ---- Pop trap frame ----
-    POPR 15                    ; cause (discarded)
+    POPR 15                    ; cause
     POPR 14                    ; epc
+    ; If ECALL (cause=8) from user program, exit it
+    PUSHR 15
+    PUSH8 8
+    EQ
+    BZ not_ecall
+    PUSH64 @CUR_PID@
+    LOAD64
+    POPR 13
+    PUSHR 13
+    PUSH8 8
+    EQ
+    BNZ not_ecall              ; shell ECALL: ignore
+    ; Kill user process: slot.state = 0
+    PUSHR 13
+    PUSH16 176
+    MUL
+    PUSH64 @PROC_TABLE@
+    ADD
+    POPR 12
+    PUSH8 0
+    PUSHR 12
+    STORE64
+    ; Fall through to scheduler (will pick next runnable)
+not_ecall:
     ; ---- R13 = CUR_PID ----
     PUSH64 @CUR_PID@
     LOAD64
