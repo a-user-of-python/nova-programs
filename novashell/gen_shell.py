@@ -34,7 +34,9 @@ STRINGS = [
      "  date          print date\n"
      "  uptime        print uptime\n"
      "  clear         clear screen\n"
-     "  ver           firmware version\n"),
+     "  ver           firmware version\n"
+     "  env           show environment\n"
+     "  history       command history\n"),
     ("S_unknown", "unknown command: "),
     ("S_catuse", "usage: cat <file>\n"),
     ("S_runuse", "usage: run <file>\n"),
@@ -964,10 +966,37 @@ do_kill:
     PUSH64 @TOK1@
     LOADU8
     BZ kill_usage
+    ; Parse multi-digit PID from TOK1
     PUSH64 @TOK1@
+    POPR 11                    ; R11 = ptr
+    PUSH8 0
+    POPR 12                    ; R12 = pid accumulator
+kill_parse:
+    PUSHR 11
+    LOADU8
+    BZ kill_parsed             ; NUL terminator
+    PUSHR 11
     LOADU8
     PUSH8 48
     SUB
+    POPR 13                    ; R13 = digit
+    PUSHR 13
+    PUSH8 10
+    LTU
+    BZ kill_fail               ; not a digit
+    PUSHR 12
+    PUSH8 10
+    MUL
+    PUSHR 13
+    ADD
+    POPR 12                    ; pid = pid*10 + digit
+    PUSHR 11
+    PUSH8 1
+    ADD
+    POPR 11                    ; ptr++
+    JMP kill_parse
+kill_parsed:
+    PUSHR 12
     POPR 11                    ; R11 = pid
     PUSHR 11
     PUSH8 8
