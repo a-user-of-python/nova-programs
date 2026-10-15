@@ -33,6 +33,9 @@ STRINGS = [
     ("S_saved", "saved\n"),
     ("S_toomany", "too many lines\n"),
     ("S_noline", "no such line\n"),
+    ("S_dbg_read", "[reading]\n"),
+    ("S_dbg_parse", "[parsing]\n"),
+    ("S_dbg_show", "[showing]\n"),
     ("S_dutz", "UTC"),
     ("S_dupt", "nova> "),
     ("S_duapi", "https://timeapi.io/api/Time/current/zone?timeZone="),
@@ -1761,6 +1764,8 @@ do_edit:
     LOADU8
     BZ edit_usage
     PUSHR 15                   ; save history count (editor uses R15)
+    PUSH64 @S_dbg_read@
+    CALL print_str
     PUSH64 @TOK1@
     PUSH64 0x4000
     PUSH16 8192
@@ -1770,6 +1775,8 @@ do_edit:
     PUSH64 0xFFFFFFFFFFFFFFFF
     EQ
     BNZ ed_new
+    PUSH64 @S_dbg_parse@
+    CALL print_str
     PUSH64 0x4000
     PUSHR 14
     CALL ed_parse
@@ -1779,6 +1786,8 @@ ed_new:
     PUSH64 @EDIT_NLINES@
     STORE64
 ed_show:
+    PUSH64 @S_dbg_show@
+    CALL print_str
     CALL ed_display
 ed_loop:
     PUSH64 @S_editprompt@
