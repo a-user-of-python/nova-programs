@@ -137,7 +137,9 @@ asm = """
 main:
     PUSH64 0xDEADBEEFCAFEBABE
     POPR 0
+    PUSHR 15
     PUSH64 0xFEEDFACEDEADBEEF
+    ADD
     POPR 1
     PUSH64 0xAAAAAAAAAAAAAAAA
     POPR 2
@@ -193,7 +195,7 @@ def patch_push64(code, placeholder, value):
     return code, count
 
 code, _ = patch_push64(code, 0xDEADBEEFCAFEBABE, 0xFFFFFFFFFFFF0000)
-code, _ = patch_push64(code, 0xFEEDFACEDEADBEEF, data_addr)
+code, _ = patch_push64(code, 0xFEEDFACEDEADBEEF, len(code))
 code, _ = patch_push64(code, 0xAAAAAAAAAAAAAAAA, len(data))
 
 binary = code + data

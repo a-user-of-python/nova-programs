@@ -13,7 +13,7 @@ import sys, os
 sys.path.insert(0, os.path.expanduser("~/workspace/nova-cpu"))
 from novas import assemble
 
-MAX_SIZE = 4096
+MAX_SIZE = 65536
 
 # (name, python-string) — NUL-terminated in the image, 8-byte padded
 STRINGS = [
@@ -24,16 +24,15 @@ STRINGS = [
      "  help          list commands\n"
      "  ls            list shared folder\n"
      "  cat <file>    show file contents\n"
-     "  run <file>    load program at 0x1000 and run it\n"
+     "  run <file>    run program\n"
+     "  ps            list processes\n"
+     "  kill <pid>    kill process\n"
      "  pwd           print working directory\n"
      "  echo <text>   print text\n"
      "  whoami        print user name\n"
      "  uname         print system info\n"
      "  date          print date\n"
      "  uptime        print uptime\n"
-     "  ps            list processes\n"
-     "  env           show environment\n"
-     "  history       show command history\n"
      "  clear         clear screen\n"
      "  ver           firmware version\n"),
     ("S_unknown", "unknown command: "),
@@ -65,6 +64,15 @@ STRINGS = [
     ("S_c_run", "run"),
     ("S_c_clear", "clear"),
     ("S_c_ver", "ver"),
+    ("S_c_kill", "kill"),
+    ("S_killuse", "usage: kill <pid>\n"),
+    ("S_killdone", "killed\n"),
+    ("S_killfail", "kill failed\n"),
+    ("S_noslot", "no free process slot\n"),
+    ("S_ps_header", "  PID TTY          CMD\n"),
+    ("S_ps_indent", "    "),
+    ("S_ps_mid", " con          program\n"),
+    ("S_ps_shell", "    8 con          novash\n"),
 ]
 
 # (name, size in bytes) — zero-filled buffers after the strings
@@ -74,6 +82,9 @@ BUFFERS = [
     ("TOK1", 64),        # argument token (file path)
     ("IO_BUF", 384),     # file listing / file read buffer
     ("HIST_BUF", 640),   # command history: 20 slots x 32 bytes
+    ("PROC_TABLE", 1584), # 9 slots x 176 bytes (0-7 programs, 8 shell)
+    ("CUR_PID", 8),      # current process ID
+    ("HANDLER_SCRATCH", 40), # 5 x 8 bytes for R11-R15 in timer handler
 ]
 
 CODE = r"""
@@ -86,6 +97,28 @@ CODE = r"""
 ;   R11-R14 = scratch
 
 _start:
+    ; ---- Zero all BSS buffers (do NOT rely on VM zeroing memory) ----
+    ; LINE_BUF(128)+TOK0(16)+TOK1(64)+IO_BUF(384)+HIST_BUF(640)
+    ; +PROC_TABLE(1584)+CUR_PID(8)+HANDLER_SCRATCH(40) = 2864 bytes = 358 qwords
+    PUSH64 @LINE_BUF@
+    POPR 11                    ; R11 = addr
+    PUSH16 358
+    POPR 12                    ; R12 = qword count
+bss_zero:
+    PUSHR 12
+    BZ bss_zero_done
+    PUSH8 0
+    PUSHR 11
+    STORE64                    ; *addr = 0
+    PUSHR 11
+    PUSH8 8
+    ADD
+    POPR 11                    ; addr += 8
+    PUSHR 12
+    DEC
+    POPR 12                    ; count -= 1
+    JMP bss_zero
+bss_zero_done:
     DSPGET
     POPR 10                    ; save entry DSP for `run`
     PUSH64 0xFFFFFFFFFFFF0000
@@ -102,10 +135,27 @@ _start:
     POPR 5                     ; R5 = file arg2
     PUSH64 0xFFFFFFFFFFFF0030
     POPR 6                     ; R6 = file result
+    PUSH64 0xFFFFFFFFFFFF0040
+    POPR 7                     ; R7 = timer interval
+    PUSH64 0xFFFFFFFFFFFF0050
+    POPR 9                     ; R9 = timer vector
     PUSH8 0
     POPR 15                    ; R15 = history count
     PUSH64 @IO_BUF@
     POPR 8                     ; R8 = IO_BUF (used by ls/cat via PUSHR 8)
+    ; NOTE: R8 is reused for IO_BUF; timer uses R7 and R9.
+    ; ---- Preemptive scheduler ----
+    PUSH64 100000
+    PUSHR 7
+    STORE64                    ; timer interval = 100k cycles
+    PUSH64 timer_handler
+    PUSHR 9
+    STORE64                    ; timer vector
+    PUSH8 8
+    PUSH64 @CUR_PID@
+    STORE64                    ; CUR_PID = 8 (shell)
+    ; Process table for 2-program scheduler (firmware not counted).
+    ; Process table zeroed at boot (see bss_zero above); all slots FREE.
     PUSH64 @S_banner@
     CALL print_str
     JMP main_loop
@@ -260,7 +310,26 @@ tk_store:
     JMP tk_next
 tk_space:
     PUSHR 13
-    BNZ tk_next                ; already in arg: skip spaces
+    BZ tk_space_cmd            ; in cmd: end tok0, switch to arg
+    ; in arg: preserve the space (filenames may contain spaces),
+    ; but skip leading spaces in the arg.
+    PUSHR 12
+    BZ tk_next                 ; leading space in arg: skip
+    PUSHR 12
+    PUSH8 63
+    LT
+    BZ tk_next                 ; tok1 full: drop
+    PUSH64 @TOK1@
+    PUSHR 12
+    ADD
+    PUSH8 32
+    SWAP
+    STORE8                     ; store the space
+    PUSHR 12
+    INC
+    POPR 12
+    JMP tk_next
+tk_space_cmd:
     PUSHR 12
     BZ tk_next                 ; leading space: skip
     PUSH64 @TOK0@              ; end tok0 ...
@@ -490,6 +559,10 @@ hdone:
     CALL streq
     BNZ do_ps
     PUSH64 @TOK0@
+    PUSH64 @S_c_kill@
+    CALL streq
+    BNZ do_kill
+    PUSH64 @TOK0@
     PUSH64 @S_c_env@
     CALL streq
     BNZ do_env
@@ -541,11 +614,6 @@ do_date:
 
 do_uptime:
     PUSH64 @S_uptime_t@
-    CALL print_str
-    JMP main_loop
-
-do_ps:
-    PUSH64 @S_ps_t@
     CALL print_str
     JMP main_loop
 
@@ -728,16 +796,48 @@ cat_usage:
     JMP main_loop
 
 ; ---------- do_run: load program at 0x1000 and jump ----------
+; ---------- do_run: load program into a free slot, scheduler starts it ----------
+; Slot layout (176 bytes): +0 state, +8 PC, +16 DSP, +24 CSP, +32..+152 R0-R15
 do_run:
     PUSH64 @TOK1@
     LOADU8
-    BZ run_usage
+    BZ run_usage               ; no filename given
+    ; --- Find a free slot 0-7 ---
+    PUSH8 0
+    POPR 11                    ; R11 = slot
+find_slot:
+    PUSHR 11
+    PUSH8 8
+    LTU
+    BZ run_noslot
+    PUSHR 11
+    PUSH16 176
+    MUL
+    PUSH64 @PROC_TABLE@
+    ADD
+    LOAD64                     ; state
+    PUSH8 0
+    EQ
+    BNZ found_slot
+    PUSHR 11
+    INC
+    POPR 11
+    JMP find_slot
+found_slot:
+    ; R11 = slot. R13 = load_addr = 0x10000 + slot*0x10000 (64KB slots)
+    PUSHR 11
+    PUSH32 65536
+    MUL
+    PUSH32 65536
+    ADD
+    POPR 13
+    ; --- Load file via MMIO ---
     PUSH64 @TOK1@
     PUSHR 3
     STORE64                    ; ARG0 = path
-    PUSH16 4096
+    PUSHR 13
     PUSHR 4
-    STORE64                    ; ARG1 = 0x1000
+    STORE64                    ; ARG1 = load_addr
     PUSH32 65536
     PUSHR 5
     STORE64                    ; ARG2 = 64KB max
@@ -746,23 +846,455 @@ do_run:
     STORE64                    ; CMD = READ
     PUSHR 6
     LOAD64
-    POPR 11                    ; R11 = bytes read
-    PUSHR 11
+    POPR 14                    ; R14 = bytes read (temp)
+    PUSHR 14
     PUSH64 0xFFFFFFFFFFFFFFFF
     EQ
-    BNZ run_err
-    PUSHR 10
-    DSPSET                     ; restore entry data-stack pointer
-    PUSH16 4096
-    JMPI                       ; PC = 0x1000 (no return)
-run_err:
+    BNZ run_failed
+    JMP run_setup
+run_failed:
     PUSH64 @S_runfail@
+    CALL print_str
+    JMP main_loop
+run_setup:
+    ; R14 = prog DSP = shell DSP - 1MB - slot*512KB
+    ; (adapts to any RAM size; stays within [dslim, dataStackBase])
+    DSPGET
+    PUSH32 1048576
+    SUB
+    PUSHR 11
+    PUSH32 524288
+    MUL
+    SUB
+    POPR 14
+    ; R12 = slot_addr = PROC_TABLE + slot*176
+    PUSHR 11
+    PUSH16 176
+    MUL
+    PUSH64 @PROC_TABLE@
+    ADD
+    POPR 12
+    ; slot.state = 1
+    PUSH8 1
+    PUSHR 12
+    STORE64
+    ; slot.PC = load_addr (R13)
+    PUSHR 13
+    PUSHR 12
+    PUSH8 8
+    ADD
+    STORE64
+    ; slot.DSP = R14
+    PUSHR 14
+    PUSHR 12
+    PUSH8 16
+    ADD
+    STORE64
+    ; slot.CSP = shell CSP - 64KB - slot*64KB
+    CSPGET
+    PUSH32 65536
+    SUB
+    PUSHR 11
+    PUSH32 65536
+    MUL
+    SUB
+    PUSHR 12
+    PUSH8 24
+    ADD
+    STORE64
+    ; R15 = load_addr (so position-dependent programs can find their data)
+    PUSHR 13
+    PUSHR 12
+    PUSH16 152
+    ADD
+    STORE64
+    ; Done. The timer will preempt the shell and start the program.
+    ; (R0-R14 in the slot are zero = fresh process; R15 = load address.)
+    JMP main_loop
+run_noslot:
+    PUSH64 @S_noslot@
     CALL print_str
     JMP main_loop
 run_usage:
     PUSH64 @S_runuse@
     CALL print_str
     JMP main_loop
+
+; ---------- do_ps: list processes ----------
+do_ps:
+    PUSH64 @S_ps_header@
+    CALL print_str
+    PUSH8 0
+    POPR 14                    ; R14 = pid (R11 is clobbered by print_str)
+sched_ps_loop:
+    PUSHR 14
+    PUSH8 8
+    LTU
+    BZ sched_ps_shell
+    PUSHR 14
+    PUSH16 176
+    MUL
+    PUSH64 @PROC_TABLE@
+    ADD
+    LOAD64                     ; state
+    PUSH8 1
+    EQ
+    BZ sched_ps_next
+    PUSH64 @S_ps_indent@
+    CALL print_str
+    PUSHR 14
+    PUSH8 48
+    ADD                        ; '0' + pid
+    PUSHR 0
+    STORE8                     ; emit digit
+    PUSH64 @S_ps_mid@
+    CALL print_str
+sched_ps_next:
+    PUSHR 14
+    INC
+    POPR 14
+    JMP sched_ps_loop
+sched_ps_shell:
+    PUSH64 @S_ps_shell@
+    CALL print_str
+    JMP main_loop
+
+; ---------- do_kill: terminate a process ----------
+do_kill:
+    PUSH64 @TOK1@
+    LOADU8
+    BZ kill_usage
+    PUSH64 @TOK1@
+    LOADU8
+    PUSH8 48
+    SUB
+    POPR 11                    ; R11 = pid
+    PUSHR 11
+    PUSH8 8
+    LTU
+    BZ kill_fail               ; pid >= 8: cannot kill shell/nonexistent
+    ; slot.state = 0
+    PUSHR 11
+    PUSH16 176
+    MUL
+    PUSH64 @PROC_TABLE@
+    ADD
+    POPR 12
+    PUSH8 0
+    PUSHR 12
+    STORE64
+    PUSH64 @S_killdone@
+    CALL print_str
+    JMP main_loop
+kill_fail:
+    PUSH64 @S_killfail@
+    CALL print_str
+    JMP main_loop
+kill_usage:
+    PUSH64 @S_killuse@
+    CALL print_str
+    JMP main_loop
+
+; ================= Timer Handler: preemptive context switch =================
+; On entry (from VM): data stack has [epc, cause] (cause on top).
+; Interrupts are disabled by the VM; MRET re-enables them.
+; Saves: PC, DSP, CSP, R0-R15 of CUR_PID.
+; Restores: next runnable PID's state. Uses CSRSET+MRET to resume.
+timer_handler:
+    ; ---- Save R11-R15 to scratch (they are our temporaries) ----
+    PUSHR 11
+    PUSH64 @HANDLER_SCRATCH@
+    STORE64
+    PUSHR 12
+    PUSH64 @HANDLER_SCRATCH@
+    PUSH8 8
+    ADD
+    STORE64
+    PUSHR 13
+    PUSH64 @HANDLER_SCRATCH@
+    PUSH8 16
+    ADD
+    STORE64
+    PUSHR 14
+    PUSH64 @HANDLER_SCRATCH@
+    PUSH8 24
+    ADD
+    STORE64
+    PUSHR 15
+    PUSH64 @HANDLER_SCRATCH@
+    PUSH8 32
+    ADD
+    STORE64
+    ; ---- Pop trap frame ----
+    POPR 15                    ; cause (discarded)
+    POPR 14                    ; epc
+    ; ---- R13 = CUR_PID ----
+    PUSH64 @CUR_PID@
+    LOAD64
+    POPR 13
+    ; ---- R12 = slot addr ----
+    PUSHR 13
+    PUSH16 176
+    MUL
+    PUSH64 @PROC_TABLE@
+    ADD
+    POPR 12
+    ; ---- Save PC ----
+    PUSHR 14
+    PUSHR 12
+    PUSH8 8
+    ADD
+    STORE64
+    ; ---- Save DSP ----
+    DSPGET
+    PUSHR 12
+    PUSH8 16
+    ADD
+    STORE64
+    ; ---- Save CSP ----
+    CSPGET
+    PUSHR 12
+    PUSH8 24
+    ADD
+    STORE64
+    ; ---- Save R0-R10 ----
+    PUSHR 0
+    PUSHR 12
+    PUSH8 32
+    ADD
+    STORE64
+    PUSHR 1
+    PUSHR 12
+    PUSH8 40
+    ADD
+    STORE64
+    PUSHR 2
+    PUSHR 12
+    PUSH8 48
+    ADD
+    STORE64
+    PUSHR 3
+    PUSHR 12
+    PUSH8 56
+    ADD
+    STORE64
+    PUSHR 4
+    PUSHR 12
+    PUSH8 64
+    ADD
+    STORE64
+    PUSHR 5
+    PUSHR 12
+    PUSH8 72
+    ADD
+    STORE64
+    PUSHR 6
+    PUSHR 12
+    PUSH8 80
+    ADD
+    STORE64
+    PUSHR 7
+    PUSHR 12
+    PUSH8 88
+    ADD
+    STORE64
+    PUSHR 8
+    PUSHR 12
+    PUSH8 96
+    ADD
+    STORE64
+    PUSHR 9
+    PUSHR 12
+    PUSH8 104
+    ADD
+    STORE64
+    PUSHR 10
+    PUSHR 12
+    PUSH8 112
+    ADD
+    STORE64
+    ; ---- Save R11-R15 from scratch ----
+    PUSH64 @HANDLER_SCRATCH@
+    LOAD64
+    PUSHR 12
+    PUSH8 120
+    ADD
+    STORE64
+    PUSH64 @HANDLER_SCRATCH@
+    PUSH8 8
+    ADD
+    LOAD64
+    PUSHR 12
+    PUSH16 128
+    ADD
+    STORE64
+    PUSH64 @HANDLER_SCRATCH@
+    PUSH8 16
+    ADD
+    LOAD64
+    PUSHR 12
+    PUSH16 136
+    ADD
+    STORE64
+    PUSH64 @HANDLER_SCRATCH@
+    PUSH8 24
+    ADD
+    LOAD64
+    PUSHR 12
+    PUSH16 144
+    ADD
+    STORE64
+    PUSH64 @HANDLER_SCRATCH@
+    PUSH8 32
+    ADD
+    LOAD64
+    PUSHR 12
+    PUSH16 152
+    ADD
+    STORE64
+    ; ---- Select next PID: round-robin from cur+1, PID 8 always runnable ----
+    PUSHR 13
+    INC
+    POPR 11                    ; R11 = candidate
+select_loop:
+    PUSHR 11
+    PUSH8 9
+    LTU
+    BNZ select_check
+    PUSH8 0
+    POPR 11                    ; wrap to 0
+select_check:
+    PUSHR 11
+    PUSH8 8
+    EQ
+    BNZ select_found           ; shell always runnable
+    PUSHR 11
+    PUSH16 176
+    MUL
+    PUSH64 @PROC_TABLE@
+    ADD
+    LOAD64
+    PUSH8 1
+    EQ
+    BNZ select_found
+    PUSHR 11
+    INC
+    POPR 11
+    JMP select_loop
+select_found:
+    ; R11 = next PID. Update CUR_PID.
+    PUSHR 11
+    PUSH64 @CUR_PID@
+    STORE64
+    ; R12 = new slot addr
+    PUSHR 11
+    PUSH16 176
+    MUL
+    PUSH64 @PROC_TABLE@
+    ADD
+    POPR 12
+    ; ---- Restore DSP ----
+    PUSHR 12
+    PUSH8 16
+    ADD
+    LOAD64
+    DSPSET
+    ; ---- Restore CSP ----
+    PUSHR 12
+    PUSH8 24
+    ADD
+    LOAD64
+    CSPSET
+    ; ---- Restore R0-R10 ----
+    PUSHR 12
+    PUSH8 32
+    ADD
+    LOAD64
+    POPR 0
+    PUSHR 12
+    PUSH8 40
+    ADD
+    LOAD64
+    POPR 1
+    PUSHR 12
+    PUSH8 48
+    ADD
+    LOAD64
+    POPR 2
+    PUSHR 12
+    PUSH8 56
+    ADD
+    LOAD64
+    POPR 3
+    PUSHR 12
+    PUSH8 64
+    ADD
+    LOAD64
+    POPR 4
+    PUSHR 12
+    PUSH8 72
+    ADD
+    LOAD64
+    POPR 5
+    PUSHR 12
+    PUSH8 80
+    ADD
+    LOAD64
+    POPR 6
+    PUSHR 12
+    PUSH8 88
+    ADD
+    LOAD64
+    POPR 7
+    PUSHR 12
+    PUSH8 96
+    ADD
+    LOAD64
+    POPR 8
+    PUSHR 12
+    PUSH8 104
+    ADD
+    LOAD64
+    POPR 9
+    PUSHR 12
+    PUSH8 112
+    ADD
+    LOAD64
+    POPR 10
+    ; ---- Restore R11, R13, R14, R15 (R12 last) ----
+    PUSHR 12
+    PUSH8 120
+    ADD
+    LOAD64
+    POPR 11
+    PUSHR 12
+    PUSH16 136
+    ADD
+    LOAD64
+    POPR 13
+    PUSHR 12
+    PUSH16 144
+    ADD
+    LOAD64
+    POPR 14
+    PUSHR 12
+    PUSH16 152
+    ADD
+    LOAD64
+    POPR 15
+    ; ---- Load new PC, set epc, restore R12, MRET ----
+    PUSHR 12
+    PUSH8 8
+    ADD
+    LOAD64                     ; [new_pc]
+    PUSHR 12
+    PUSH16 128
+    ADD
+    LOAD64                     ; [new_pc, saved_R12]
+    POPR 12                    ; [new_pc], R12 restored
+    CSRSET 0                   ; epc = new_pc
+    MRET                       ; pc = epc, interrupts re-enabled
+
 """
 
 
