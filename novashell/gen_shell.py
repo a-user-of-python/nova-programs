@@ -22,6 +22,20 @@ STRINGS = [
     ("S_datestr", "Date: "),
     ("S_timestr", "   Time: "),
     ("S_utcstr", " UTC\n"),
+    ("S_c_edit", "edit"),
+    ("S_edituse", "usage: edit <file>\n"),
+    ("S_editprompt", "edit> "),
+    ("S_cfg_name", "novash.cfg"),
+    ("S_cfg_tz", "timezone="),
+    ("S_cfg_prompt", "prompt="),
+    ("S_cfg_api", "date_api="),
+    ("S_defconfig", "timezone=UTC\nprompt=nova> \ndate_api=https://timeapi.io/api/Time/current/zone?timeZone=\n"),
+    ("S_saved", "saved\n"),
+    ("S_toomany", "too many lines\n"),
+    ("S_noline", "no such line\n"),
+    ("S_dutz", "UTC"),
+    ("S_dupt", "nova> "),
+    ("S_duapi", "https://timeapi.io/api/Time/current/zone?timeZone="),
     ("S_prompt", "nova> "),
     ("S_help",
      "Commands:\n"
@@ -41,7 +55,8 @@ STRINGS = [
      "  ver           firmware version\n"
      "  env           show environment\n"
      "  history       command history\n"
-     "  fetch <url>   fetch URL over HTTP(S)\n"),
+     "  fetch <url>   fetch URL over HTTP(S)\n"
+     "  edit <file>   edit a text file\n"),
     ("S_unknown", "unknown command: "),
     ("S_catuse", "usage: cat <file>\n"),
     ("S_runuse", "usage: run <file>\n"),
@@ -101,6 +116,11 @@ BUFFERS = [
     ("HANDLER_SCRATCH", 40), # 5 x 8 bytes for R11-R15 in timer handler
     ("UPTIME", 8),            # 64-bit tick counter, incremented every timer tick
     ("DATETIME", 48),         # cached date/time string from network sync
+    ("CFG_TIMEZONE", 64),     # timezone from novash.cfg (e.g. America/New_York)
+    ("CFG_PROMPT", 32),        # shell prompt from novash.cfg
+    ("CFG_DATE_API", 128),     # time API base URL from novash.cfg
+    ("URL_BUF", 256),          # assembled time API URL
+    ("EDIT_NLINES", 8),        # editor line count
 ]
 
 CODE = r"""
@@ -115,10 +135,10 @@ CODE = r"""
 _start:
     ; ---- Zero all BSS buffers (do NOT rely on VM zeroing memory) ----
     ; LINE_BUF(128)+TOK0(16)+TOK1(64)+IO_BUF(384)+HIST_BUF(640)
-    ; +PROC_TABLE(1584)+CUR_PID(8)+HANDLER_SCRATCH(40)+UPTIME(8)+DATETIME(48) = 2920 bytes = 365 qwords
+    ; +PROC_TABLE(1584)+CUR_PID(8)+HANDLER_SCRATCH(40)+UPTIME(8)+DATETIME(48)+CFG_TIMEZONE(64)+CFG_PROMPT(32)+CFG_DATE_API(128)+URL_BUF(256)+EDIT_NLINES(8) = 3408 bytes = 426 qwords
     PUSH64 @LINE_BUF@
     POPR 11                    ; R11 = addr
-    PUSH16 365
+    PUSH16 426
     POPR 12                    ; R12 = qword count
 bss_zero:
     PUSHR 12
@@ -174,6 +194,8 @@ bss_zero_done:
     ; Process table zeroed at boot (see bss_zero above); all slots FREE.
     PUSH64 @S_banner@
     CALL print_str
+    ; ---- Load config (creates default novash.cfg if missing) ----
+    CALL load_config
     ; ---- Auto-sync date/time at boot (quick 5s timeout; skip if offline) ----
     CALL date_sync
     BZ boot_no_date
@@ -514,7 +536,7 @@ ha_cterm:
 
 ; ---------- main loop ----------
 main_loop:
-    PUSH64 @S_prompt@
+    PUSH64 @CFG_PROMPT@
     CALL print_str
     CALL read_line              ; [len]
     DUP
@@ -590,6 +612,10 @@ hdone:
     CALL streq
     BNZ do_fetch
     PUSH64 @TOK0@
+    PUSH64 @S_c_edit@
+    CALL streq
+    BNZ do_edit
+    PUSH64 @TOK0@
     PUSH64 @S_c_env@
     CALL streq
     BNZ do_env
@@ -636,7 +662,23 @@ do_uname:
 
 do_date:
     ; Manual sync uses the full timeout, then parses and prints.
-    PUSH64 @S_timeapi@
+    ; Build URL from config like date_sync.
+    PUSH64 @CFG_DATE_API@
+    PUSH64 @URL_BUF@
+    CALL strcpy
+    PUSH64 @URL_BUF@
+    CALL strlen
+    POPR 12
+    PUSH64 @URL_BUF@
+    PUSHR 12
+    ADD
+    POPR 13
+    PUSH64 @CFG_TIMEZONE@
+    POPR 11
+    PUSHR 13
+    PUSHR 11
+    CALL strcpy
+    PUSH64 @URL_BUF@
     PUSH8 1
     CALL net_get
     POPR 11
@@ -1192,10 +1234,26 @@ dpb_fail:
     RET
 
 ; ---------- date_sync: -> flag (1=ok, 0=fail) ----------
-; Fetches real UTC time (quick timeout) and caches it in DATETIME.
-; No output. Used at boot and by the date command.
+; Fetches real time for the configured timezone (quick timeout)
+; and caches it in DATETIME. No output. Used at boot and by date.
 date_sync:
-    PUSH64 @S_timeapi@
+    ; Build URL: CFG_DATE_API + CFG_TIMEZONE -> URL_BUF
+    PUSH64 @CFG_DATE_API@
+    PUSH64 @URL_BUF@
+    CALL strcpy
+    PUSH64 @URL_BUF@
+    CALL strlen
+    POPR 12
+    PUSH64 @URL_BUF@
+    PUSHR 12
+    ADD
+    POPR 13                    ; R13 = dst
+    PUSH64 @CFG_TIMEZONE@
+    POPR 11                    ; R11 = src
+    PUSHR 13
+    PUSHR 11
+    CALL strcpy
+    PUSH64 @URL_BUF@
     PUSH8 2
     CALL net_get
     POPR 11
@@ -1246,8 +1304,12 @@ pdt_time:
     POPR 11
     PUSHR 11
     CALL print_str
-    PUSH64 @S_utcstr@
+    PUSH8 32
+    PUSHR 0
+    STORE8
+    PUSH64 @CFG_TIMEZONE@
     CALL print_str
+    CALL print_newline
     RET
 pdt_end:
     POP
@@ -1362,6 +1424,736 @@ pu64_loop:
 pu64_done:
     PUSHR 12
     CALL print_str
+    RET
+
+; ================= Config (novash.cfg) =================
+
+; ---------- cp_value: copy value after prefix (R12=src, R13=dst, R15=max) ----------
+cp_value:
+cv_loop:
+    PUSHR 15
+    BZ cv_done
+    PUSHR 12
+    LOADU8
+    DUP
+    BZ cv_done
+    DUP
+    PUSH8 10
+    EQ
+    BNZ cv_done
+    POPR 11
+    PUSHR 11
+    PUSHR 13
+    STORE8
+    PUSHR 12
+    INC
+    POPR 12
+    PUSHR 13
+    INC
+    POPR 13
+    PUSHR 15
+    PUSH8 1
+    SUB
+    POPR 15
+    JMP cv_loop
+cv_done:
+    POP
+    PUSH8 0
+    PUSHR 13
+    STORE8
+    RET
+
+; ---------- cfg_parse: buf n -> (fills CFG_* from key=value lines) ----------
+cfg_parse:
+    POPR 14                    ; R14 = n
+    POPR 11                    ; R11 = buf
+    PUSHR 15                   ; save R15 (history count) on stack
+cp_next:
+    PUSHR 14
+    BZ cp_done
+    PUSHR 11
+    PUSH64 @S_cfg_tz@
+    CALL startswith
+    BNZ cp_is_tz
+    PUSHR 11
+    PUSH64 @S_cfg_prompt@
+    CALL startswith
+    BNZ cp_is_prompt
+    PUSHR 11
+    PUSH64 @S_cfg_api@
+    CALL startswith
+    BNZ cp_is_api
+    JMP cp_skip
+cp_is_tz:
+    PUSH8 9
+    PUSHR 11
+    ADD
+    POPR 12
+    PUSH64 @CFG_TIMEZONE@
+    POPR 13
+    PUSH8 63
+    POPR 15
+    CALL cp_value
+    JMP cp_skip
+cp_is_prompt:
+    PUSH8 7
+    PUSHR 11
+    ADD
+    POPR 12
+    PUSH64 @CFG_PROMPT@
+    POPR 13
+    PUSH8 31
+    POPR 15
+    CALL cp_value
+    JMP cp_skip
+cp_is_api:
+    PUSH8 9
+    PUSHR 11
+    ADD
+    POPR 12
+    PUSH64 @CFG_DATE_API@
+    POPR 13
+    PUSH8 127
+    POPR 15
+    CALL cp_value
+    JMP cp_skip
+cp_skip:
+cp_adv:
+    PUSHR 14
+    BZ cp_done
+    PUSHR 11
+    LOADU8
+    DUP
+    BZ cp_done2
+    DUP
+    PUSH8 10
+    EQ
+    BNZ cp_adv_nl
+    POP
+    PUSHR 11
+    INC
+    POPR 11
+    PUSHR 14
+    PUSH8 1
+    SUB
+    POPR 14
+    JMP cp_adv
+cp_adv_nl:
+    POP
+    PUSHR 11
+    INC
+    POPR 11
+    PUSHR 14
+    PUSH8 1
+    SUB
+    POPR 14
+    JMP cp_next
+cp_done2:
+    POP
+cp_done:
+    POPR 15                    ; restore R15
+    RET
+
+; ---------- load_config: read novash.cfg or write defaults ----------
+load_config:
+    PUSH64 @S_dutz@
+    PUSH64 @CFG_TIMEZONE@
+    CALL strcpy
+    PUSH64 @S_dupt@
+    PUSH64 @CFG_PROMPT@
+    CALL strcpy
+    PUSH64 @S_duapi@
+    PUSH64 @CFG_DATE_API@
+    CALL strcpy
+    PUSH64 @S_cfg_name@
+    PUSH64 0x4000
+    PUSH16 4096
+    CALL file_read
+    DUP
+    PUSH64 0xFFFFFFFFFFFFFFFF
+    EQ
+    BNZ lc_def
+    DUP
+    PUSH8 0
+    EQ
+    BNZ lc_def
+    POPR 14
+    PUSH64 0x4000
+    PUSHR 14
+    CALL cfg_parse
+    RET
+lc_def:
+    POP
+    PUSH64 @S_cfg_name@
+    PUSH64 @S_defconfig@
+    PUSH64 @S_defconfig@
+    CALL strlen
+    CALL file_write
+    POP
+    RET
+
+; ================= File editor =================
+; EDIT_BUF at 0x8000: 64 lines x 128 bytes. EDIT_NLINES in BSS.
+
+; ---------- file_read: path buf size -> n (-1=error) ----------
+file_read:
+    POPR 14
+    POPR 13
+    POPR 12
+    PUSHR 12
+    PUSHR 3
+    STORE64
+    PUSHR 13
+    PUSHR 4
+    STORE64
+    PUSHR 14
+    PUSHR 5
+    STORE64
+    PUSH8 2
+    PUSHR 2
+    STORE64
+    PUSHR 6
+    LOAD64
+    RET
+
+; ---------- file_write: path buf size -> n (-1=error) ----------
+file_write:
+    POPR 14
+    POPR 13
+    POPR 12
+    PUSHR 12
+    PUSHR 3
+    STORE64
+    PUSHR 13
+    PUSHR 4
+    STORE64
+    PUSHR 14
+    PUSHR 5
+    STORE64
+    PUSH8 3
+    PUSHR 2
+    STORE64
+    PUSHR 6
+    LOAD64
+    RET
+
+; ---------- strcpy: dst src -> ----------
+strcpy:
+    POPR 12
+    POPR 11
+sc_loop:
+    PUSHR 12
+    LOADU8
+    DUP
+    BZ sc_done
+    POPR 13
+    PUSHR 13
+    PUSHR 11
+    STORE8
+    PUSHR 11
+    INC
+    POPR 11
+    PUSHR 12
+    INC
+    POPR 12
+    JMP sc_loop
+sc_done:
+    POP
+    PUSH8 0
+    PUSHR 11
+    STORE8
+    RET
+
+; ---------- strlen: str -> len ----------
+strlen:
+    POPR 11
+    PUSH8 0
+    POPR 12
+sl_loop:
+    PUSHR 11
+    LOADU8
+    BZ sl_done
+    PUSHR 11
+    INC
+    POPR 11
+    PUSHR 12
+    INC
+    POPR 12
+    JMP sl_loop
+sl_done:
+    PUSHR 12
+    RET
+
+; ---------- parse_uint: str -> value rest ----------
+parse_uint:
+    POPR 11
+    PUSH8 0
+    POPR 12
+pu_loop:
+    PUSHR 11
+    LOADU8
+    POPR 13
+    PUSHR 13
+    PUSH8 48
+    SUB
+    PUSH8 10
+    DIVU
+    BNZ pu_done
+    PUSHR 13
+    PUSH8 48
+    SUB
+    POPR 13
+    PUSHR 12
+    PUSH8 10
+    MUL
+    PUSHR 13
+    ADD
+    POPR 12
+    PUSHR 11
+    INC
+    POPR 11
+    JMP pu_loop
+pu_done:
+    PUSHR 12
+    PUSHR 11
+    RET
+
+; ---------- line_copy: src dst -> (copies up to 127 chars + NUL) ----------
+line_copy:
+    POPR 13
+    POPR 11
+    PUSH8 0
+    POPR 14
+lc_loop:
+    PUSHR 14
+    PUSH8 127
+    EQ
+    BNZ lc_done
+    PUSHR 11
+    LOADU8
+    DUP
+    BZ lc_done
+    POPR 12
+    PUSHR 12
+    PUSHR 13
+    PUSHR 14
+    ADD
+    STORE8
+    PUSHR 11
+    INC
+    POPR 11
+    PUSHR 14
+    INC
+    POPR 14
+    JMP lc_loop
+lc_done:
+    POP
+    PUSH8 0
+    PUSHR 13
+    PUSHR 14
+    ADD
+    STORE8
+    RET
+
+; ---------- do_edit: line editor ----------
+do_edit:
+    PUSH64 @TOK1@
+    LOADU8
+    BZ edit_usage
+    PUSHR 15                   ; save history count (editor uses R15)
+    PUSH64 @TOK1@
+    PUSH64 0x4000
+    PUSH16 8192
+    CALL file_read
+    POPR 14
+    PUSHR 14
+    PUSH64 0xFFFFFFFFFFFFFFFF
+    EQ
+    BNZ ed_new
+    PUSH64 0x4000
+    PUSHR 14
+    CALL ed_parse
+    JMP ed_show
+ed_new:
+    PUSH8 0
+    PUSH64 @EDIT_NLINES@
+    STORE64
+ed_show:
+    CALL ed_display
+ed_loop:
+    PUSH64 @S_editprompt@
+    CALL print_str
+    CALL read_line
+    POP
+    PUSH64 @LINE_BUF@
+    LOADU8
+    BZ ed_loop
+    PUSH64 @LINE_BUF@
+    LOADU8
+    PUSH8 119
+    EQ
+    BNZ ed_do_write
+    PUSH64 @LINE_BUF@
+    LOADU8
+    PUSH8 113
+    EQ
+    BNZ ed_do_quit
+    PUSH64 @LINE_BUF@
+    LOADU8
+    PUSH8 100
+    EQ
+    BNZ ed_do_delete
+    ; digit? -> replace
+    PUSH64 @LINE_BUF@
+    LOADU8
+    DUP
+    PUSH8 48
+    SUB
+    PUSH8 10
+    DIVU
+    BZ ed_do_replace
+    POP
+    ; else append line
+    PUSH64 @LINE_BUF@
+    CALL ed_append
+    JMP ed_show
+ed_do_write:
+    CALL ed_write
+    PUSH64 @S_saved@
+    CALL print_str
+    POPR 15                    ; restore history count
+    JMP main_loop
+ed_do_quit:
+    POPR 15                    ; restore history count
+    JMP main_loop
+ed_do_delete:
+    ; "d <n>"
+    PUSH64 @LINE_BUF@
+    PUSH8 1
+    ADD
+    CALL parse_uint            ; [n, rest]
+    POP                        ; [n]
+    CALL ed_delete
+    JMP ed_show
+ed_do_replace:
+    POP
+    PUSH64 @LINE_BUF@
+    CALL parse_uint
+    POPR 12
+    POPR 11
+    ; skip one space
+    PUSHR 12
+    LOADU8
+    PUSH8 32
+    EQ
+    BZ er_nospace
+    PUSHR 12
+    INC
+    POPR 12
+er_nospace:
+    PUSHR 12
+    PUSHR 11
+    CALL ed_replace
+    JMP ed_show
+edit_usage:
+    PUSH64 @S_edituse@
+    CALL print_str
+    JMP main_loop
+
+; ---------- ed_parse: buf n -> (split into EDIT_BUF lines) ----------
+ed_parse:
+    POPR 14
+    POPR 11
+    PUSH8 0
+    POPR 12
+    PUSH64 0x8000
+    POPR 13
+ep_line:
+    PUSHR 14
+    BZ ep_done
+    PUSHR 12
+    PUSH8 64
+    EQ
+    BNZ ep_done
+    PUSH8 0
+    POPR 15
+ep_char:
+    PUSHR 14
+    BZ ep_line_end
+    PUSHR 11
+    LOADU8
+    DUP
+    BZ ep_done2
+    DUP
+    PUSH8 10
+    EQ
+    BNZ ep_line_nl
+    PUSHR 15
+    PUSH8 127
+    EQ
+    BNZ ep_skip
+    ; stack: [ch] → store at R13+R15 (don't use R10: it's the saved DSP)
+    PUSHR 13
+    PUSHR 15
+    ADD
+    STORE8
+    PUSHR 11
+    INC
+    POPR 11
+    PUSHR 14
+    PUSH8 1
+    SUB
+    POPR 14
+    PUSHR 15
+    INC
+    POPR 15
+    JMP ep_char
+ep_skip:
+    POP
+    PUSHR 11
+    INC
+    POPR 11
+    PUSHR 14
+    PUSH8 1
+    SUB
+    POPR 14
+    JMP ep_char
+ep_line_nl:
+    POP
+    PUSHR 11
+    INC
+    POPR 11
+    PUSHR 14
+    PUSH8 1
+    SUB
+    POPR 14
+ep_line_end:
+    PUSH8 0
+    PUSHR 13
+    PUSHR 15
+    ADD
+    STORE8
+    PUSHR 12
+    INC
+    POPR 12
+    PUSHR 13
+    PUSH16 128
+    ADD
+    POPR 13
+    JMP ep_line
+ep_done2:
+    POP
+ep_done:
+    PUSHR 12
+    PUSH64 @EDIT_NLINES@
+    STORE64
+    RET
+
+; ---------- ed_display: show numbered lines ----------
+ed_display:
+    PUSH64 @EDIT_NLINES@
+    LOAD64
+    POPR 12
+    PUSH8 0
+    POPR 13
+ed_d_loop:
+    PUSHR 13
+    PUSHR 12
+    EQ
+    BNZ ed_d_done
+    PUSHR 13
+    PUSH8 1
+    ADD
+    CALL print_uint64
+    PUSH8 58
+    PUSHR 0
+    STORE8
+    PUSH8 32
+    PUSHR 0
+    STORE8
+    PUSH16 128
+    PUSHR 13
+    MUL
+    PUSH64 0x8000
+    ADD
+    CALL print_str
+    CALL print_newline
+    PUSHR 13
+    INC
+    POPR 13
+    JMP ed_d_loop
+ed_d_done:
+    RET
+
+; ---------- ed_append: line -> ----------
+ed_append:
+    POPR 11
+    PUSH64 @EDIT_NLINES@
+    LOAD64
+    POPR 12
+    PUSHR 12
+    PUSH8 64
+    EQ
+    BNZ ed_a_full
+    PUSH16 128
+    PUSHR 12
+    MUL
+    PUSH64 0x8000
+    ADD
+    POPR 13
+    PUSHR 11
+    PUSHR 13
+    CALL line_copy
+    PUSHR 12
+    INC
+    PUSH64 @EDIT_NLINES@
+    STORE64
+    RET
+ed_a_full:
+    PUSH64 @S_toomany@
+    CALL print_str
+    RET
+
+; ---------- ed_replace: text n -> (n is 1-based) ----------
+ed_replace:
+    POPR 11
+    POPR 12
+    PUSHR 11
+    BZ er_bad
+    PUSH64 @EDIT_NLINES@
+    LOAD64
+    POPR 13
+    PUSHR 13
+    PUSHR 11
+    LTU
+    BNZ er_bad
+    PUSHR 11
+    PUSH8 1
+    SUB
+    PUSH16 128
+    MUL
+    PUSH64 0x8000
+    ADD
+    POPR 13
+    PUSHR 12
+    PUSHR 13
+    CALL line_copy
+    RET
+er_bad:
+    PUSH64 @S_noline@
+    CALL print_str
+    RET
+
+; ---------- ed_delete: n -> (n is 1-based) ----------
+ed_delete:
+    POPR 11                    ; R11 = n
+    PUSHR 11
+    BZ er_bad
+    PUSH64 @EDIT_NLINES@
+    LOAD64
+    POPR 12                    ; R12 = nlines
+    PUSHR 12
+    PUSHR 11
+    LTU
+    BNZ er_bad
+    PUSHR 11
+    POPR 13                    ; R13 = i = n
+    PUSHR 12                   ; save nlines
+ed_del_loop:
+    PUSHR 13
+    PUSHR 12
+    EQ
+    BNZ ed_del_done
+    ; src = line i+1 (0-based i), dst = line i (0-based i-1)
+    PUSHR 13
+    PUSH16 128
+    MUL
+    PUSH64 0x8000
+    ADD                        ; [src]
+    PUSHR 13
+    PUSH8 1
+    SUB
+    PUSH16 128
+    MUL
+    PUSH64 0x8000
+    ADD                        ; [src, dst]
+    PUSHR 12                   ; save nlines
+    PUSHR 13                   ; save i
+    CALL line_copy
+    POPR 13
+    POPR 12
+    PUSHR 13
+    INC
+    POPR 13
+    JMP ed_del_loop
+ed_del_done:
+    POP                        ; drop saved nlines
+    PUSHR 12
+    PUSH8 1
+    SUB
+    PUSH64 @EDIT_NLINES@
+    STORE64
+    RET
+
+; ---------- ed_write: save to TOK1 ----------
+ed_write:
+    PUSH8 0
+    POPR 14                    ; R14 = out len
+    PUSH64 @EDIT_NLINES@
+    LOAD64
+    POPR 12                    ; R12 = nlines
+    PUSH8 0
+    POPR 13                    ; R13 = i
+ed_w_loop:
+    PUSHR 13
+    PUSHR 12
+    EQ
+    BNZ ed_w_done
+    ; copy line i to 0x4000+R14
+    PUSH16 128
+    PUSHR 13
+    MUL
+    PUSH64 0x8000
+    ADD
+    POPR 11                    ; R11 = src
+ed_w_char:
+    PUSHR 11
+    LOADU8
+    DUP
+    BZ ed_w_nl
+    POPR 15
+    PUSHR 15
+    PUSH64 0x4000
+    PUSHR 14
+    ADD
+    STORE8
+    PUSHR 11
+    INC
+    POPR 11
+    PUSHR 14
+    INC
+    POPR 14
+    JMP ed_w_char
+ed_w_nl:
+    POP
+    PUSH8 10
+    PUSH64 0x4000
+    PUSHR 14
+    ADD
+    STORE8
+    PUSHR 14
+    INC
+    POPR 14
+    PUSHR 13
+    INC
+    POPR 13
+    JMP ed_w_loop
+ed_w_done:
+    PUSH64 @TOK1@
+    PUSH64 0x4000
+    PUSHR 14
+    CALL file_write
+    POP
     RET
 
 ; ================= Timer Handler: preemptive context switch =================
