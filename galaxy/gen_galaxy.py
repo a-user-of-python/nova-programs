@@ -147,7 +147,14 @@ for l in lines[:14]:
     clean = re.sub(r'\x1b\[[0-9;]*m', '', l)
     print(clean[:85])
 
-asm = """
+import json as _json
+with open(os.path.expanduser("~/workspace/nova-programs/novashell/firmware_addrs.json")) as _jf:
+    _addrs = _json.load(_jf)
+_UPTIME_ADDR = _addrs["UPTIME"]
+_DATETIME_ADDR = _addrs["DATETIME"]
+print(f"Firmware addrs: UPTIME={_UPTIME_ADDR} DATETIME={_DATETIME_ADDR}")
+
+asm = f"""
 main:
     ; R15 = load address (firmware sets it). Data parts follow the code.
     PUSH64 0xDEADBEEFCAFEBABE
@@ -164,7 +171,7 @@ main:
     PUSH8 32
     PUSHR 0
     STORE8
-    PUSH64 0x1E50
+    PUSH64 {_UPTIME_ADDR}
     LOAD64
     PUSH8 10
     DIVU
@@ -211,7 +218,7 @@ main:
     PUSH8 32
     PUSHR 0
     STORE8
-    PUSH64 0x1E58
+    PUSH64 {_DATETIME_ADDR}
     POPR 1                      ; R1 = datetime str
 pr_date:
     PUSHR 1

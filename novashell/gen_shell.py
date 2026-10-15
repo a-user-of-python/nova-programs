@@ -1163,6 +1163,28 @@ dpb_copy_done:
     PUSH8 0
     PUSHR 12
     STORE8
+    ; Validate format: YYYY-MM-DDTHH:MM:SS (positions 4,7='-', 10='T')
+    PUSH64 @DATETIME@
+    PUSH8 4
+    ADD
+    LOADU8
+    PUSH8 45
+    EQ
+    BZ dpb_fail
+    PUSH64 @DATETIME@
+    PUSH8 7
+    ADD
+    LOADU8
+    PUSH8 45
+    EQ
+    BZ dpb_fail
+    PUSH64 @DATETIME@
+    PUSH8 10
+    ADD
+    LOADU8
+    PUSH8 84
+    EQ
+    BZ dpb_fail
     PUSH8 1
     RET
 dpb_fail:
@@ -1710,6 +1732,10 @@ def main():
 
     total = addr
     print(f"strings+buffers = {total - len(code)} bytes, total = {total} bytes")
+    import json as _json
+    with open("firmware_addrs.json", "w") as _f:
+        _json.dump({"UPTIME": addrs["UPTIME"], "DATETIME": addrs["DATETIME"]}, _f)
+    print(f"UPTIME @ {addrs['UPTIME']} (0x{addrs['UPTIME']:x}), DATETIME @ {addrs['DATETIME']} (0x{addrs['DATETIME']:x})")
     if total > MAX_SIZE:
         raise SystemExit(f"firmware too large: {total} > {MAX_SIZE}")
 
