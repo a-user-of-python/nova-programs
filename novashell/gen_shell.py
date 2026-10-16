@@ -138,10 +138,10 @@ CODE = r"""
 _start:
     ; ---- Zero all BSS buffers (do NOT rely on VM zeroing memory) ----
     ; LINE_BUF(128)+TOK0(16)+TOK1(64)+IO_BUF(384)+HIST_BUF(640)
-    ; BSS buffers: 19792 bytes = 2474 qwords
+    ; BSS buffers: 20176 bytes = 2522 qwords
     PUSH64 @LINE_BUF@
     POPR 11                    ; R11 = addr
-    PUSH16 2474
+    PUSH16 2522
     POPR 12                    ; R12 = qword count
 bss_zero:
     PUSHR 12
@@ -1569,7 +1569,7 @@ load_config:
     PUSH64 @S_duapi@
     CALL strcpy
     PUSH64 @S_cfg_name@
-    PUSH64 0x4000
+    PUSH64 @EDIT_FILE_BUF@
     PUSH16 4096
     CALL file_read
     DUP
@@ -1581,7 +1581,7 @@ load_config:
     EQ
     BNZ lc_def
     POPR 14
-    PUSH64 0x4000
+    PUSH64 @EDIT_FILE_BUF@
     PUSHR 14
     CALL cfg_parse
     RET
@@ -1975,7 +1975,11 @@ ed_d_loop:
     PUSHR 13
     PUSH8 1
     ADD
+    PUSHR 12                   ; save nlines (print_uint64 clobbers R12/R13)
+    PUSHR 13                   ; save line index
     CALL print_uint64
+    POPR 13                    ; restore line index
+    POPR 12                    ; restore nlines
     PUSH8 58
     PUSHR 0
     STORE8
