@@ -122,6 +122,7 @@ BUFFERS = [
     ("CFG_DATE_API", 128),     # time API base URL from novash.cfg
     ("URL_BUF", 256),          # assembled time API URL
     ("EDIT_NLINES", 8),        # editor line count
+    ("EDIT_FILE_BUF", 8192),  # editor file read buffer (replaces hardcoded 0x4000)
 ]
 
 CODE = r"""
@@ -136,10 +137,10 @@ CODE = r"""
 _start:
     ; ---- Zero all BSS buffers (do NOT rely on VM zeroing memory) ----
     ; LINE_BUF(128)+TOK0(16)+TOK1(64)+IO_BUF(384)+HIST_BUF(640)
-    ; +PROC_TABLE(1584)+CUR_PID(8)+HANDLER_SCRATCH(40)+UPTIME(8)+DATETIME(48)+CFG_TIMEZONE(64)+CFG_PROMPT(32)+CFG_DATE_API(128)+URL_BUF(256)+EDIT_NLINES(8) = 3408 bytes = 426 qwords
+    ; +PROC_TABLE(1584)+CUR_PID(8)+HANDLER_SCRATCH(40)+UPTIME(8)+DATETIME(48)+CFG_TIMEZONE(64)+CFG_PROMPT(32)+CFG_DATE_API(128)+URL_BUF(256)+EDIT_NLINES(8)+EDIT_FILE_BUF(8192) = 11600 bytes = 1450 qwords
     PUSH64 @LINE_BUF@
     POPR 11                    ; R11 = addr
-    PUSH16 426
+    PUSH16 1450
     POPR 12                    ; R12 = qword count
 bss_zero:
     PUSHR 12
@@ -1763,7 +1764,7 @@ do_edit:
     BZ edit_usage
     PUSHR 15                   ; save history count (editor uses R15)
     PUSH64 @TOK1@
-    PUSH64 0x4000
+    PUSH64 @EDIT_FILE_BUF@
     PUSH16 8192
     CALL file_read
     POPR 14
@@ -1771,7 +1772,7 @@ do_edit:
     PUSH64 0xFFFFFFFFFFFFFFFF
     EQ
     BNZ ed_new
-    PUSH64 0x4000
+    PUSH64 @EDIT_FILE_BUF@
     PUSHR 14
     CALL ed_parse
     JMP ed_show
@@ -2118,7 +2119,7 @@ ed_w_loop:
     PUSHR 12
     EQ
     BNZ ed_w_done
-    ; copy line i to 0x4000+R14
+    ; copy line i to EDIT_FILE_BUF+R14
     PUSH16 128
     PUSHR 13
     MUL
@@ -2132,7 +2133,7 @@ ed_w_char:
     BZ ed_w_nl
     POPR 15
     PUSHR 15
-    PUSH64 0x4000
+    PUSH64 @EDIT_FILE_BUF@
     PUSHR 14
     ADD
     STORE8
@@ -2146,7 +2147,7 @@ ed_w_char:
 ed_w_nl:
     POP
     PUSH8 10
-    PUSH64 0x4000
+    PUSH64 @EDIT_FILE_BUF@
     PUSHR 14
     ADD
     STORE8
@@ -2159,7 +2160,7 @@ ed_w_nl:
     JMP ed_w_loop
 ed_w_done:
     PUSH64 @TOK1@
-    PUSH64 0x4000
+    PUSH64 @EDIT_FILE_BUF@
     PUSHR 14
     CALL file_write
     POP
