@@ -1773,11 +1773,13 @@ do_edit:
     PUSH64 0xFFFFFFFFFFFFFFFF
     EQ
     BNZ ed_new
+    POP                        ; drop n from the -1 check; stack is now [saved_R15]
     PUSH64 @EDIT_FILE_BUF@
     PUSHR 14
     CALL ed_parse
     JMP ed_show
 ed_new:
+    POP                        ; drop n (-1); stack is now [saved_R15]
     PUSH8 0
     PUSH64 @EDIT_NLINES@
     STORE64
