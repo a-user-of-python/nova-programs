@@ -122,7 +122,8 @@ BUFFERS = [
     ("CFG_DATE_API", 128),     # time API base URL from novash.cfg
     ("URL_BUF", 256),          # assembled time API URL
     ("EDIT_NLINES", 8),        # editor line count
-    ("EDIT_FILE_BUF", 8192),  # editor file read buffer (replaces hardcoded 0x4000)
+    ("EDIT_FILE_BUF", 8192),  # editor file read buffer
+    ("EDIT_BUF", 8192),       # editor lines: 64 x 128 bytes (was hardcoded 0x8000)
 ]
 
 CODE = r"""
@@ -137,10 +138,10 @@ CODE = r"""
 _start:
     ; ---- Zero all BSS buffers (do NOT rely on VM zeroing memory) ----
     ; LINE_BUF(128)+TOK0(16)+TOK1(64)+IO_BUF(384)+HIST_BUF(640)
-    ; +PROC_TABLE(1584)+CUR_PID(8)+HANDLER_SCRATCH(40)+UPTIME(8)+DATETIME(48)+CFG_TIMEZONE(64)+CFG_PROMPT(32)+CFG_DATE_API(128)+URL_BUF(256)+EDIT_NLINES(8)+EDIT_FILE_BUF(8192) = 11600 bytes = 1450 qwords
+    ; BSS buffers: 19792 bytes = 2474 qwords
     PUSH64 @LINE_BUF@
     POPR 11                    ; R11 = addr
-    PUSH16 1450
+    PUSH16 2474
     POPR 12                    ; R12 = qword count
 bss_zero:
     PUSHR 12
@@ -1868,7 +1869,7 @@ ed_parse:
     POPR 11
     PUSH8 0
     POPR 12
-    PUSH64 0x8000
+    PUSH64 @EDIT_BUF@
     POPR 13
 ep_line:
     PUSHR 14
@@ -1984,7 +1985,7 @@ ed_d_loop:
     PUSH16 128
     PUSHR 13
     MUL
-    PUSH64 0x8000
+    PUSH64 @EDIT_BUF@
     ADD
     CALL print_str
     CALL print_newline
@@ -2008,7 +2009,7 @@ ed_append:
     PUSH16 128
     PUSHR 12
     MUL
-    PUSH64 0x8000
+    PUSH64 @EDIT_BUF@
     ADD
     POPR 13
     PUSHR 11
@@ -2042,7 +2043,7 @@ ed_replace:
     SUB
     PUSH16 128
     MUL
-    PUSH64 0x8000
+    PUSH64 @EDIT_BUF@
     ADD
     POPR 13
     PUSHR 12
@@ -2078,14 +2079,14 @@ ed_del_loop:
     PUSHR 13
     PUSH16 128
     MUL
-    PUSH64 0x8000
+    PUSH64 @EDIT_BUF@
     ADD                        ; [src]
     PUSHR 13
     PUSH8 1
     SUB
     PUSH16 128
     MUL
-    PUSH64 0x8000
+    PUSH64 @EDIT_BUF@
     ADD                        ; [src, dst]
     PUSHR 12                   ; save nlines
     PUSHR 13                   ; save i
@@ -2123,7 +2124,7 @@ ed_w_loop:
     PUSH16 128
     PUSHR 13
     MUL
-    PUSH64 0x8000
+    PUSH64 @EDIT_BUF@
     ADD
     POPR 11                    ; R11 = src
 ed_w_char:
