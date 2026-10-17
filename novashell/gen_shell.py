@@ -138,10 +138,10 @@ CODE = r"""
 _start:
     ; ---- Zero all BSS buffers (do NOT rely on VM zeroing memory) ----
     ; LINE_BUF(128)+TOK0(16)+TOK1(64)+IO_BUF(384)+HIST_BUF(640)
-    ; BSS buffers: 20176 bytes = 2522 qwords
+    ; BSS buffers: 19792 bytes = 2474 qwords
     PUSH64 @LINE_BUF@
     POPR 11                    ; R11 = addr
-    PUSH16 2522
+    PUSH16 2474
     POPR 12                    ; R12 = qword count
 bss_zero:
     PUSHR 12
@@ -1722,9 +1722,11 @@ pu_done:
     RET
 
 ; ---------- line_copy: src dst -> (copies up to 127 chars + NUL) ----------
+; Callee-saved: R12 is preserved (ed_append needs nlines in R12 after the call).
 line_copy:
     POPR 13
     POPR 11
+    PUSHR 12                   ; save R12
     PUSH8 0
     POPR 14
 lc_loop:
@@ -1756,6 +1758,7 @@ lc_done:
     PUSHR 14
     ADD
     STORE8
+    POPR 12                    ; restore R12
     RET
 
 ; ---------- do_edit: line editor ----------
@@ -1773,13 +1776,11 @@ do_edit:
     PUSH64 0xFFFFFFFFFFFFFFFF
     EQ
     BNZ ed_new
-    POP                        ; drop n from the -1 check; stack is now [saved_R15]
     PUSH64 @EDIT_FILE_BUF@
     PUSHR 14
     CALL ed_parse
     JMP ed_show
 ed_new:
-    POP                        ; drop n (-1); stack is now [saved_R15]
     PUSH8 0
     PUSH64 @EDIT_NLINES@
     STORE64
@@ -1974,11 +1975,11 @@ ed_d_loop:
     PUSHR 12
     EQ
     BNZ ed_d_done
-    PUSHR 13
-    PUSH8 1
-    ADD
     PUSHR 12                   ; save nlines (print_uint64 clobbers R12/R13)
     PUSHR 13                   ; save line index
+    PUSHR 13
+    PUSH8 1
+    ADD                        ; [nlines, i, i+1]: arg on top for the call
     CALL print_uint64
     POPR 13                    ; restore line index
     POPR 12                    ; restore nlines
@@ -2082,23 +2083,23 @@ ed_del_loop:
     EQ
     BNZ ed_del_done
     ; src = line i+1 (0-based i), dst = line i (0-based i-1)
+    ; Save i BELOW src/dst: line_copy pops (dst, src) and clobbers R13,
+    ; but preserves R12 (nlines), so only i needs saving.
+    PUSHR 13                   ; [i]
     PUSHR 13
     PUSH16 128
     MUL
     PUSH64 @EDIT_BUF@
-    ADD                        ; [src]
+    ADD                        ; [i, src]
     PUSHR 13
     PUSH8 1
     SUB
     PUSH16 128
     MUL
     PUSH64 @EDIT_BUF@
-    ADD                        ; [src, dst]
-    PUSHR 12                   ; save nlines
-    PUSHR 13                   ; save i
-    CALL line_copy
-    POPR 13
-    POPR 12
+    ADD                        ; [i, src, dst]
+    CALL line_copy             ; [i]
+    POPR 13                    ; restore i
     PUSHR 13
     INC
     POPR 13
