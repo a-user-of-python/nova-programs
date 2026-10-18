@@ -1733,7 +1733,7 @@ lc_loop:
     PUSHR 14
     PUSH8 127
     EQ
-    BNZ lc_done
+    BNZ lc_full
     PUSHR 11
     LOADU8
     DUP
@@ -1751,6 +1751,11 @@ lc_loop:
     INC
     POPR 14
     JMP lc_loop
+lc_full:
+    ; 127 chars copied: BNZ path leaves the stack empty, but lc_done's POP
+    ; expects the leftover char the BZ path leaves. Push a dummy 0 (== the
+    ; NUL the BZ path would have found) so both paths enter lc_done with [x].
+    PUSH8 0
 lc_done:
     POP
     PUSH8 0
